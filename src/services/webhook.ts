@@ -30,10 +30,6 @@ export class WebhookService {
   }
 
   private setupRoutes(): void {
-    this.app.use('/', (req: Request, res: Response) => {
-      res.json({ status: 'ok', timestamp: new Date().toISOString() });
-    });
-
     // Health check endpoint
     this.app.get('/health', (req: Request, res: Response) => {
       res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -126,6 +122,16 @@ export class WebhookService {
         });
         res.status(500).json({ error: 'Internal server error' });
       }
+    });
+
+    // Root endpoint
+    this.app.get('/', (req: Request, res: Response) => {
+      res.json({
+        status: 'ok',
+        service: 'telegram-github-stars',
+        timestamp: new Date().toISOString(),
+        environment: config.nodeEnv
+      });
     });
 
     // Catch-all route for unhandled requests

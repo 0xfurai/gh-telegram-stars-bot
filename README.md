@@ -160,7 +160,7 @@ npm run test-cron    # Test external cron configuration
 | `MAX_REPOS_PER_CHAT` | Maximum repositories per user | 50 |
 | `ALLOWED_CHAT_IDS` | Comma-separated list of allowed chat IDs | None (open to all) |
 | `WEBHOOK_URL` | Public URL for webhook (optional) | None (uses polling) |
-| `WEBHOOK_PORT` | Port for webhook server | 3000 |
+| `PORT` | Port for webhook server | 3000 |
 | `WEBHOOK_SECRET` | Secret token for webhook security | None |
 | `EXTERNAL_CRON_ENABLED` | Use external cron instead of internal scheduler | false |
 | `CRON_API_KEY` | API key for external cron endpoint security | None |
@@ -192,7 +192,7 @@ The bot supports two modes of operation:
 2. **Configure webhook environment variables**:
    ```env
    WEBHOOK_URL=https://your-domain.com
-   WEBHOOK_PORT=3000
+   PORT=3000
    WEBHOOK_SECRET=your_secure_random_string
    ```
 

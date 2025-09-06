@@ -6,9 +6,7 @@ export const config = {
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || "",
     webhookUrl: process.env.WEBHOOK_URL || "",
-    webhookPort: parseInt(
-      process.env.WEBHOOK_PORT || process.env.PORT || "3000"
-    ),
+    webhookPort: parseInt(process.env.PORT || "3000"),
     webhookSecret: process.env.WEBHOOK_SECRET || "",
   },
   supabase: {

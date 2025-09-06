@@ -11,7 +11,7 @@ async function testWebhook() {
 
   if (!isWebhookMode) {
     console.log('❌ Webhook mode not configured');
-    console.log('   Set WEBHOOK_URL and WEBHOOK_PORT in your .env file');
+    console.log('   Set WEBHOOK_URL and PORT in your .env file');
     return;
   }
 

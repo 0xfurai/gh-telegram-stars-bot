@@ -20,7 +20,7 @@ async function testExternalCron() {
   // Check if webhook port is configured
   if (!config.telegram.webhookPort) {
     console.log('❌ Webhook port not configured');
-    console.log('   Set WEBHOOK_PORT in your .env file');
+    console.log('   Set PORT in your .env file');
     return;
   }
 

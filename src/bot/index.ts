@@ -1,16 +1,32 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../config';
 import { BotHandlers } from './handlers';
+import { WebhookService } from '../services/webhook';
 
 export class TelegramBotService {
   private bot: TelegramBot;
   private handlers: BotHandlers;
+  private webhookService?: WebhookService;
+  private isWebhookMode: boolean;
 
   constructor() {
-    this.bot = new TelegramBot(config.telegram.botToken, { polling: true });
+    // Determine if we should use webhook mode
+    this.isWebhookMode = !!(config.telegram.webhookUrl && config.telegram.webhookPort);
+
+    // Initialize bot with appropriate mode
+    this.bot = new TelegramBot(config.telegram.botToken, {
+      polling: !this.isWebhookMode
+    });
+
     this.handlers = new BotHandlers();
     this.setupHandlers();
     this.setupErrorHandlers();
+
+    // Initialize webhook service if in webhook mode or external cron is enabled
+    if (this.isWebhookMode || config.cron.externalEnabled) {
+      this.webhookService = new WebhookService();
+      this.setupWebhook();
+    }
   }
 
   private setupHandlers(): void {
@@ -55,6 +71,26 @@ export class TelegramBotService {
         this.handlers.handleMessage(this.bot, msg);
       }
     });
+  }
+
+  private setupWebhook(): void {
+    if (!this.webhookService) return;
+
+    // Set up webhook message handler for Telegram updates
+    if (this.isWebhookMode) {
+      this.webhookService.setMessageHandler((update: any) => {
+        this.bot.processUpdate(update);
+      });
+    }
+  }
+
+  setPollingService(pollingService: any): void {
+    if (this.webhookService && config.cron.externalEnabled) {
+      // Set up external cron polling handler
+      this.webhookService.setPollingHandler(async () => {
+        await pollingService.runPollingCycle();
+      });
+    }
   }
 
   private setupErrorHandlers(): void {
@@ -118,8 +154,23 @@ export class TelegramBotService {
 
   async stop(): Promise<void> {
     try {
-      await this.bot.stopPolling();
-      console.log('Telegram bot stopped');
+      if (this.isWebhookMode) {
+        // Delete webhook and stop webhook server
+        await this.bot.deleteWebHook();
+        if (this.webhookService) {
+          await this.webhookService.stop();
+        }
+        console.log('Telegram bot webhook stopped');
+      } else if (config.cron.externalEnabled && this.webhookService) {
+        // Stop webhook server (used for external cron)
+        await this.bot.deleteWebHook();
+        await this.webhookService.stop();
+        console.log('Telegram bot polling and external cron server stopped');
+      } else {
+        // Stop polling
+        await this.bot.stopPolling();
+        console.log('Telegram bot polling stopped');
+      }
     } catch (error) {
       console.error('Error stopping bot:', error);
     }
@@ -127,7 +178,7 @@ export class TelegramBotService {
 
   async start(): Promise<void> {
     try {
-      console.log('Starting Telegram bot...');
+      console.log(`Starting Telegram bot in ${this.isWebhookMode ? 'webhook' : 'polling'} mode...`);
 
       // Set bot commands for better UX
       await this.bot.setMyCommands([
@@ -140,7 +191,36 @@ export class TelegramBotService {
       ]);
 
       const botInfo = await this.bot.getMe();
-      console.log(`Bot started successfully: @${botInfo.username}`);
+
+      if (this.isWebhookMode && this.webhookService) {
+        // Start webhook server
+        await this.webhookService.start();
+
+        // Set webhook URL
+        await this.bot.setWebHook(config.telegram.webhookUrl + '/webhook', {
+          secret_token: config.telegram.webhookSecret || undefined,
+        });
+
+        console.log(`Bot started successfully in webhook mode: @${botInfo.username}`);
+        console.log(`Webhook URL: ${config.telegram.webhookUrl}/webhook`);
+
+        if (config.cron.externalEnabled) {
+          console.log(`External cron endpoint available: ${config.telegram.webhookUrl}/poll`);
+        }
+      } else if (config.cron.externalEnabled && this.webhookService) {
+        // Start webhook server for external cron endpoint only
+        await this.webhookService.start();
+
+        // Remove any existing webhook since we're using polling for Telegram
+        await this.bot.deleteWebHook();
+
+        console.log(`Bot started successfully in polling mode with external cron: @${botInfo.username}`);
+        console.log(`External cron endpoint: http://localhost:${config.telegram.webhookPort}/poll`);
+      } else {
+        // Remove any existing webhook
+        await this.bot.deleteWebHook();
+        console.log(`Bot started successfully in polling mode: @${botInfo.username}`);
+      }
     } catch (error) {
       console.error('Failed to start bot:', error);
       throw error;

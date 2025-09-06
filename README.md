@@ -121,16 +121,31 @@ npm start
 **Telegram Error: "terminated by other getUpdates request"**
 - Solution: Stop any other bot instances, wait 2 minutes, then restart
 - Make sure you're not running the bot elsewhere
+- Consider switching to webhook mode to avoid this issue
 
 **GitHub Error: "Bad credentials"**
 - Solution: Check your `GITHUB_TOKEN` in `.env`
 - Create a new Personal Access Token if needed
+
+**Webhook Error: "Webhook not receiving updates"**
+- Verify your `WEBHOOK_URL` is publicly accessible via HTTPS
+- Check that the webhook secret matches if configured
+- Test the webhook endpoint: `curl https://your-domain.com/health`
+- Ensure port 3000 (or your configured port) is accessible
+
+**External Cron Error: "Polling endpoint not working"**
+- Verify `EXTERNAL_CRON_ENABLED=true` is set in your environment
+- Check that the API key matches if configured: `curl -X POST http://localhost:3000/poll -H "Authorization: Bearer your_api_key"`
+- Ensure the server is running and the webhook service is started
+- Check logs for authentication errors
 
 **Quick Diagnosis:**
 ```bash
 npm run troubleshoot  # Check all connections
 npm run test-db      # Test database only
 npm run test-polling # Test GitHub polling
+npm run test-webhook # Test webhook configuration
+npm run test-cron    # Test external cron configuration
 ```
 
 ## Configuration Options
@@ -144,7 +159,125 @@ npm run test-polling # Test GitHub polling
 | `POLLING_INTERVAL_MINUTES` | How often to check for new stars | 30 |
 | `MAX_REPOS_PER_CHAT` | Maximum repositories per user | 50 |
 | `ALLOWED_CHAT_IDS` | Comma-separated list of allowed chat IDs | None (open to all) |
+| `WEBHOOK_URL` | Public URL for webhook (optional) | None (uses polling) |
+| `WEBHOOK_PORT` | Port for webhook server | 3000 |
+| `WEBHOOK_SECRET` | Secret token for webhook security | None |
+| `EXTERNAL_CRON_ENABLED` | Use external cron instead of internal scheduler | false |
+| `CRON_API_KEY` | API key for external cron endpoint security | None |
 | `NODE_ENV` | Environment mode | development |
+
+## Bot Modes
+
+The bot supports two modes of operation:
+
+### 1. Polling Mode (Default)
+- Bot actively polls Telegram servers for updates
+- Easier to set up, works behind NAT/firewall
+- Uses more resources as it continuously polls
+- Enabled when `WEBHOOK_URL` is not configured
+
+### 2. Webhook Mode (Recommended for Production)
+- Telegram sends updates directly to your server
+- More efficient and responsive
+- Requires a publicly accessible HTTPS URL
+- Enabled when `WEBHOOK_URL` is configured
+
+#### Setting up Webhook Mode
+
+1. **Get a public HTTPS URL** (required by Telegram):
+   - Use a service like ngrok for testing: `ngrok http 3000`
+   - Use a reverse proxy (nginx) with SSL certificate
+   - Use a cloud service with HTTPS support
+
+2. **Configure webhook environment variables**:
+   ```env
+   WEBHOOK_URL=https://your-domain.com
+   WEBHOOK_PORT=3000
+   WEBHOOK_SECRET=your_secure_random_string
+   ```
+
+3. **Security considerations**:
+   - Always use HTTPS (required by Telegram)
+   - Set a strong `WEBHOOK_SECRET` for additional security
+   - Consider IP whitelisting for Telegram's servers
+
+4. **Testing with ngrok**:
+   ```bash
+   # Terminal 1: Start ngrok
+   ngrok http 3000
+
+   # Terminal 2: Update .env with ngrok URL
+   WEBHOOK_URL=https://abc123.ngrok.io
+
+   # Terminal 3: Start the bot
+   npm run dev
+   ```
+
+## External Cron Setup
+
+For production deployments, you might want to use an external cron service (like GitHub Actions, cloud cron jobs, or cron services) instead of the internal scheduler. This provides better control, monitoring, and reliability.
+
+### 1. Enable External Cron Mode
+
+Add these environment variables to your `.env`:
+
+```env
+EXTERNAL_CRON_ENABLED=true
+CRON_API_KEY=your_secure_api_key_here
+```
+
+### 2. External Cron Endpoint
+
+When external cron is enabled, the bot exposes a `/poll` endpoint that can be called to trigger GitHub polling:
+
+- **URL**: `POST http://your-server:3000/poll` (or your webhook URL + `/poll`)
+- **Authentication**: `Authorization: Bearer your_secure_api_key_here` (if `CRON_API_KEY` is set)
+- **Response**: `{"ok": true, "message": "Polling cycle started", "timestamp": "..."}`
+
+### 3. Example External Cron Setups
+
+#### Using cURL (for testing):
+```bash
+curl -X POST http://localhost:3000/poll \
+  -H "Authorization: Bearer your_secure_api_key_here"
+```
+
+#### Using GitHub Actions:
+```yaml
+name: Trigger Bot Polling
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+
+jobs:
+  trigger-polling:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Bot Polling
+        run: |
+          curl -X POST ${{ secrets.BOT_URL }}/poll \
+            -H "Authorization: Bearer ${{ secrets.CRON_API_KEY }}"
+```
+
+#### Using cloud cron services:
+- **Google Cloud Scheduler**: Create a job that makes POST request to your `/poll` endpoint
+- **AWS EventBridge**: Set up a scheduled rule to invoke your endpoint
+- **Vercel Cron**: Use Vercel's cron jobs to call your endpoint
+
+### 4. Benefits of External Cron
+
+- **Reliability**: Cloud cron services are more reliable than internal schedulers
+- **Monitoring**: Better visibility into cron job execution and failures
+- **Scaling**: Doesn't consume resources on your main server
+- **Flexibility**: Easy to change schedules without redeploying
+- **Redundancy**: Can set up multiple cron sources for backup
+
+### 5. Security Considerations
+
+- Always set a strong `CRON_API_KEY` in production
+- Use HTTPS for the polling endpoint
+- Consider IP whitelisting for additional security
+- Monitor for unauthorized access attempts
 
 ## Database Schema
 

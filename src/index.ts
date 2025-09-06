@@ -12,6 +12,7 @@ class Application {
 
     // Connect services
     this.polling.setBotService(this.bot);
+    this.bot.setPollingService(this.polling);
   }
 
   async start(): Promise<void> {
@@ -20,6 +21,22 @@ class Application {
       console.log(`Environment: ${config.nodeEnv}`);
       console.log(`Polling interval: ${config.bot.pollingIntervalMinutes} minutes`);
       console.log(`Max repos per chat: ${config.bot.maxReposPerChat}`);
+
+      // Check if webhook mode is configured
+      const isWebhookMode = !!(config.telegram.webhookUrl && config.telegram.webhookPort);
+      const isExternalCron = config.cron.externalEnabled;
+
+      console.log(`Bot mode: ${isWebhookMode ? 'Webhook' : 'Polling'}`);
+      console.log(`Cron mode: ${isExternalCron ? 'External' : 'Internal'}`);
+
+      if (isWebhookMode) {
+        console.log(`Webhook URL: ${config.telegram.webhookUrl}`);
+        console.log(`Webhook port: ${config.telegram.webhookPort}`);
+      }
+
+      if (isExternalCron) {
+        console.log(`External cron API key: ${config.cron.apiKey ? 'Configured' : 'Not set (endpoint will be unprotected)'}`);
+      }
 
       if (config.bot.allowedChatIds.length > 0) {
         console.log(`Restricted to chat IDs: ${config.bot.allowedChatIds.join(', ')}`);
@@ -30,17 +47,35 @@ class Application {
       // Start the Telegram bot
       await this.bot.start();
 
-      // Start scheduled polling
-      this.polling.startScheduledPolling();
+      // Handle GitHub polling based on cron mode
+      if (config.cron.externalEnabled) {
+        console.log('External cron mode enabled - GitHub polling will be triggered via /poll endpoint');
+        console.log('Internal cron scheduler disabled');
+      } else {
+        // Start scheduled polling for GitHub stars (this is different from Telegram polling)
+        this.polling.startScheduledPolling();
 
-      // Run an immediate polling cycle to check for any pending updates
-      setTimeout(async () => {
-        console.log('🔄 Running initial polling cycle...');
-        await this.polling.runImmediatePolling();
-      }, 5000); // Wait 5 seconds after startup
+        // Run an immediate polling cycle to check for any pending updates
+        setTimeout(async () => {
+          console.log('🔄 Running initial GitHub polling cycle...');
+          await this.polling.runImmediatePolling();
+        }, 5000); // Wait 5 seconds after startup
+      }
 
       console.log('✅ Application started successfully!');
-      console.log('Bot is now running and will check for new stars periodically.');
+      if (isWebhookMode) {
+        if (config.cron.externalEnabled) {
+          console.log('Bot is running in webhook mode with external cron for GitHub polling.');
+        } else {
+          console.log('Bot is running in webhook mode and will check for new stars periodically.');
+        }
+      } else {
+        if (config.cron.externalEnabled) {
+          console.log('Bot is running in polling mode with external cron for GitHub polling.');
+        } else {
+          console.log('Bot is running in polling mode and will check for new stars periodically.');
+        }
+      }
 
     } catch (error) {
       console.error('❌ Failed to start application:', error);
@@ -52,7 +87,11 @@ class Application {
     try {
       console.log('🛑 Stopping application...');
 
-      this.polling.stopScheduledPolling();
+      // Stop internal cron if it was started
+      if (!config.cron.externalEnabled) {
+        this.polling.stopScheduledPolling();
+      }
+
       await this.bot.stop();
 
       console.log('✅ Application stopped gracefully');

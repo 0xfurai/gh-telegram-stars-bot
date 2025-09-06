@@ -5,6 +5,9 @@ dotenv.config();
 export const config = {
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    webhookUrl: process.env.WEBHOOK_URL || '',
+    webhookPort: parseInt(process.env.WEBHOOK_PORT || '3000'),
+    webhookSecret: process.env.WEBHOOK_SECRET || '',
   },
   supabase: {
     url: process.env.SUPABASE_URL || '',
@@ -19,6 +22,10 @@ export const config = {
     allowedChatIds: process.env.ALLOWED_CHAT_IDS
       ? process.env.ALLOWED_CHAT_IDS.split(',').map(id => parseInt(id.trim()))
       : [],
+  },
+  cron: {
+    externalEnabled: process.env.EXTERNAL_CRON_ENABLED === 'true',
+    apiKey: process.env.CRON_API_KEY || '',
   },
   nodeEnv: process.env.NODE_ENV || 'development',
 };

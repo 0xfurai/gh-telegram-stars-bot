@@ -165,6 +165,7 @@ npm run test-cron    # Test external cron configuration
 | `EXTERNAL_CRON_ENABLED` | Use external cron instead of internal scheduler | false |
 | `CRON_API_KEY` | API key for external cron endpoint security | None |
 | `NODE_ENV` | Environment mode | development |
+| `LOG_LEVEL` | Logging level (error, warn, info, debug) | debug (dev), info (prod) |
 
 ## Bot Modes
 
@@ -304,6 +305,74 @@ src/
 ├── config/
 │   └── index.ts          # Configuration management
 └── index.ts              # Application entry point
+```
+
+## Logging
+
+The bot features structured logging optimized for cloud environments:
+
+### Features
+
+- **Structured JSON Logging**: All logs are output in JSON format for easy parsing by log aggregation services
+- **Correlation IDs**: Each operation gets a unique correlation ID for tracking requests across services
+- **Contextual Metadata**: Logs include relevant context like chat IDs, repository names, user IDs, etc.
+- **Log Levels**: Configurable log levels (error, warn, info, debug)
+- **Cloud-Ready**: Optimized for services like CloudWatch, Datadog, Splunk, etc.
+
+### Log Levels
+
+- **error**: Critical errors and exceptions
+- **warn**: Warning conditions that should be monitored
+- **info**: General information about operations (default for production)
+- **debug**: Detailed debugging information (default for development)
+
+### Configuration
+
+Set the log level using the `LOG_LEVEL` environment variable:
+
+```bash
+# Development (verbose)
+LOG_LEVEL=debug
+
+# Production (minimal)
+LOG_LEVEL=info
+```
+
+### Production Logging
+
+In production (`NODE_ENV=production`), logs are:
+
+- Output in structured JSON format
+- Saved to rotating daily files in the `logs/` directory
+- Automatically cleaned up after 14 days
+- Limited to 20MB per file with automatic rotation
+
+### Development Logging
+
+In development, logs are:
+
+- Colorized and human-readable
+- Include timestamps and correlation IDs
+- Output only to console
+
+### Log Context
+
+Each log entry includes contextual information:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "level": "info",
+  "message": "Star notification sent successfully",
+  "service": "telegram-github-stars",
+  "environment": "production",
+  "correlationId": "1642248600000-abc123def",
+  "component": "telegram-bot",
+  "chatId": 123456789,
+  "repository": "microsoft/vscode",
+  "starsGained": 5,
+  "totalStars": 150000
+}
 ```
 
 ## API Rate Limits

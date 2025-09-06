@@ -30,6 +30,9 @@ export const config = {
     apiKey: process.env.CRON_API_KEY || "",
   },
   nodeEnv: process.env.NODE_ENV || "development",
+  logging: {
+    level: process.env.LOG_LEVEL || (process.env.NODE_ENV === "production" ? "info" : "debug"),
+  },
 };
 
 // Validate required environment variables

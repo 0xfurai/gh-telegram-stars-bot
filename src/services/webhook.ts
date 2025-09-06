@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import bodyParser from 'body-parser';
 import { createHash, createHmac } from 'crypto';
 import { config } from '../config';
+import { logger } from './logger';
 
 export class WebhookService {
   private app: express.Application;
@@ -45,7 +46,11 @@ export class WebhookService {
         if (config.telegram.webhookSecret) {
           const signature = req.headers['x-telegram-bot-api-secret-token'];
           if (signature !== config.telegram.webhookSecret) {
-            console.warn('Invalid webhook secret received');
+            logger.warn('Invalid webhook secret received', {
+              component: 'webhook',
+              clientIp: req.ip,
+              userAgent: req.headers['user-agent']
+            });
             return res.status(401).json({ error: 'Unauthorized' });
           }
         }
@@ -58,7 +63,11 @@ export class WebhookService {
 
         res.status(200).json({ ok: true });
       } catch (error) {
-        console.error('Webhook processing error:', error);
+        logger.error('Webhook processing error', error as Error, {
+          component: 'webhook',
+          clientIp: req.ip,
+          userAgent: req.headers['user-agent']
+        });
         res.status(500).json({ error: 'Internal server error' });
       }
     });
@@ -72,7 +81,12 @@ export class WebhookService {
           const expectedAuth = `Bearer ${config.cron.apiKey}`;
 
           if (!authHeader || authHeader !== expectedAuth) {
-            console.warn('Invalid API key for polling endpoint');
+            logger.warn('Invalid API key for polling endpoint', {
+              component: 'webhook',
+              endpoint: '/poll',
+              clientIp: req.ip,
+              userAgent: req.headers['user-agent']
+            });
             return res.status(401).json({ error: 'Unauthorized' });
           }
         }
@@ -82,11 +96,20 @@ export class WebhookService {
           return res.status(503).json({ error: 'Polling service not available' });
         }
 
-        console.log('🔄 External cron triggered polling cycle...');
+        const correlationId = logger.startOperation('external-cron-polling');
+        logger.webhookOperation('🔄 External cron triggered polling cycle', {
+          correlationId,
+          clientIp: req.ip,
+          userAgent: req.headers['user-agent']
+        });
 
         // Run polling in background to avoid timeout
         this.pollingHandler().catch(error => {
-          console.error('Error in external cron polling:', error);
+          logger.endOperation(correlationId, false);
+          logger.error('Error in external cron polling', error as Error, {
+            correlationId,
+            component: 'webhook'
+          });
         });
 
         res.status(200).json({
@@ -96,7 +119,11 @@ export class WebhookService {
         });
 
       } catch (error) {
-        console.error('Polling endpoint error:', error);
+        logger.error('Polling endpoint error', error as Error, {
+          component: 'webhook',
+          endpoint: '/poll',
+          clientIp: req.ip
+        });
         res.status(500).json({ error: 'Internal server error' });
       }
     });
@@ -119,13 +146,16 @@ export class WebhookService {
     return new Promise((resolve, reject) => {
       try {
         this.server = this.app.listen(config.telegram.webhookPort, () => {
-          console.log(`Webhook server started on port ${config.telegram.webhookPort}`);
-          console.log(`Webhook URL: ${config.telegram.webhookUrl}`);
+          logger.info('Webhook server started', {
+            port: config.telegram.webhookPort,
+            webhookUrl: config.telegram.webhookUrl,
+            component: 'webhook'
+          });
           resolve();
         });
 
         this.server.on('error', (error: Error) => {
-          console.error('Webhook server error:', error);
+          logger.error('Webhook server error', error, { component: 'webhook' });
           reject(error);
         });
       } catch (error) {
@@ -139,10 +169,10 @@ export class WebhookService {
       if (this.server) {
         this.server.close((error?: Error) => {
           if (error) {
-            console.error('Error stopping webhook server:', error);
+            logger.error('Error stopping webhook server', error, { component: 'webhook' });
             reject(error);
           } else {
-            console.log('Webhook server stopped');
+            logger.info('Webhook server stopped', { component: 'webhook' });
             resolve();
           }
         });

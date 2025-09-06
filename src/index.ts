@@ -1,6 +1,7 @@
 import { TelegramBotService } from './bot';
 import { PollingService } from './services/polling';
 import { config } from './config';
+import { logger } from './services/logger';
 
 class Application {
   private bot: TelegramBotService;
@@ -16,97 +17,95 @@ class Application {
   }
 
   async start(): Promise<void> {
+    const correlationId = logger.startOperation('application-startup');
+
     try {
-      console.log('🚀 Starting GitHub Stars Telegram Bot...');
-      console.log(`Environment: ${config.nodeEnv}`);
-      console.log(`Polling interval: ${config.bot.pollingIntervalMinutes} minutes`);
-      console.log(`Max repos per chat: ${config.bot.maxReposPerChat}`);
+      logger.info('🚀 Starting GitHub Stars Telegram Bot', { correlationId });
+      logger.info('Application configuration loaded', {
+        correlationId,
+        environment: config.nodeEnv,
+        pollingInterval: config.bot.pollingIntervalMinutes,
+        maxReposPerChat: config.bot.maxReposPerChat,
+        logLevel: config.logging.level
+      });
 
       // Check if webhook mode is configured
       const isWebhookMode = !!(config.telegram.webhookUrl && config.telegram.webhookPort);
       const isExternalCron = config.cron.externalEnabled;
 
-      console.log(`Bot mode: ${isWebhookMode ? 'Webhook' : 'Polling'}`);
-      console.log(`Cron mode: ${isExternalCron ? 'External' : 'Internal'}`);
-
-      if (isWebhookMode) {
-        console.log(`Webhook URL: ${config.telegram.webhookUrl}`);
-        console.log(`Webhook port: ${config.telegram.webhookPort}`);
-      }
-
-      if (isExternalCron) {
-        console.log(`External cron API key: ${config.cron.apiKey ? 'Configured' : 'Not set (endpoint will be unprotected)'}`);
-      }
-
-      if (config.bot.allowedChatIds.length > 0) {
-        console.log(`Restricted to chat IDs: ${config.bot.allowedChatIds.join(', ')}`);
-      } else {
-        console.log('No chat ID restrictions');
-      }
+      logger.info('Bot configuration', {
+        correlationId,
+        botMode: isWebhookMode ? 'Webhook' : 'Polling',
+        cronMode: isExternalCron ? 'External' : 'Internal',
+        webhookUrl: isWebhookMode ? config.telegram.webhookUrl : undefined,
+        webhookPort: isWebhookMode ? config.telegram.webhookPort : undefined,
+        externalCronApiKey: isExternalCron ? (config.cron.apiKey ? 'Configured' : 'Not set') : undefined,
+        allowedChatIds: config.bot.allowedChatIds.length > 0 ? config.bot.allowedChatIds : 'No restrictions'
+      });
 
       // Start the Telegram bot
       await this.bot.start();
 
       // Handle GitHub polling based on cron mode
       if (config.cron.externalEnabled) {
-        console.log('External cron mode enabled - GitHub polling will be triggered via /poll endpoint');
-        console.log('Internal cron scheduler disabled');
+        logger.info('External cron mode enabled - GitHub polling will be triggered via /poll endpoint', { correlationId });
+        logger.info('Internal cron scheduler disabled', { correlationId });
       } else {
         // Start scheduled polling for GitHub stars (this is different from Telegram polling)
         this.polling.startScheduledPolling();
 
         // Run an immediate polling cycle to check for any pending updates
         setTimeout(async () => {
-          console.log('🔄 Running initial GitHub polling cycle...');
+          logger.info('🔄 Running initial GitHub polling cycle', { correlationId });
           await this.polling.runImmediatePolling();
         }, 5000); // Wait 5 seconds after startup
       }
 
-      console.log('✅ Application started successfully!');
-      if (isWebhookMode) {
-        if (config.cron.externalEnabled) {
-          console.log('Bot is running in webhook mode with external cron for GitHub polling.');
-        } else {
-          console.log('Bot is running in webhook mode and will check for new stars periodically.');
-        }
-      } else {
-        if (config.cron.externalEnabled) {
-          console.log('Bot is running in polling mode with external cron for GitHub polling.');
-        } else {
-          console.log('Bot is running in polling mode and will check for new stars periodically.');
-        }
-      }
+      logger.endOperation(correlationId, true, {
+        botMode: isWebhookMode ? 'webhook' : 'polling',
+        cronMode: isExternalCron ? 'external' : 'internal'
+      });
+
+      logger.info('✅ Application started successfully', {
+        mode: `${isWebhookMode ? 'webhook' : 'polling'} mode with ${isExternalCron ? 'external' : 'internal'} cron`
+      });
 
     } catch (error) {
-      console.error('❌ Failed to start application:', error);
+      logger.endOperation(correlationId, false);
+      logger.error('❌ Failed to start application', error as Error);
       process.exit(1);
     }
   }
 
   async stop(): Promise<void> {
+    const correlationId = logger.startOperation('application-shutdown');
+
     try {
-      console.log('🛑 Stopping application...');
+      logger.info('🛑 Stopping application', { correlationId });
 
       // Stop internal cron if it was started
       if (!config.cron.externalEnabled) {
         this.polling.stopScheduledPolling();
+        logger.info('Internal cron scheduler stopped', { correlationId });
       }
 
       await this.bot.stop();
 
-      console.log('✅ Application stopped gracefully');
+      logger.endOperation(correlationId, true);
+      logger.info('✅ Application stopped gracefully');
     } catch (error) {
-      console.error('❌ Error during shutdown:', error);
+      logger.endOperation(correlationId, false);
+      logger.error('❌ Error during shutdown', error as Error);
     }
   }
 
   setupGracefulShutdown(): void {
     const gracefulShutdown = (signal: string) => {
-      console.log(`\n📡 Received ${signal}. Starting graceful shutdown...`);
+      logger.warn(`📡 Received ${signal}. Starting graceful shutdown`, { signal });
       this.stop().then(() => {
         process.exit(0);
       }).catch((error) => {
-        console.error('Error during graceful shutdown:', error);
+        logger.error('Error during graceful shutdown', error as Error, { signal });
         process.exit(1);
       });
     };
@@ -116,12 +115,12 @@ class Application {
 
     // Handle uncaught exceptions
     process.on('uncaughtException', (error) => {
-      console.error('Uncaught Exception:', error);
+      logger.error('Uncaught Exception - terminating application', error);
       this.stop().then(() => process.exit(1));
     });
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      logger.error('Unhandled Rejection - terminating application', reason as Error, { promise: promise.toString() });
       this.stop().then(() => process.exit(1));
     });
   }
@@ -141,7 +140,7 @@ async function main() {
 // Only run if this file is executed directly
 if (require.main === module) {
   main().catch((error) => {
-    console.error('Fatal error starting application:', error);
+    logger.error('Fatal error starting application', error as Error);
     process.exit(1);
   });
 }

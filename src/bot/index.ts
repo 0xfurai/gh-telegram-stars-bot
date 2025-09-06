@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../config';
 import { BotHandlers } from './handlers';
 import { WebhookService } from '../services/webhook';
+import { logger } from '../services/logger';
 
 export class TelegramBotService {
   private bot: TelegramBot;
@@ -95,34 +96,38 @@ export class TelegramBotService {
 
   private setupErrorHandlers(): void {
     this.bot.on('polling_error', (error) => {
-      console.error('Telegram polling error:', error);
+      logger.error('Telegram polling error', error, { component: 'telegram-bot' });
 
       // Handle the "terminated by other getUpdates request" error
       if (error.message && error.message.includes('terminated by other getUpdates')) {
-        console.log('⚠️  Multiple bot instances detected. Stopping this instance...');
+        logger.warn('⚠️  Multiple bot instances detected. Stopping this instance', { component: 'telegram-bot' });
         process.exit(1);
       }
     });
 
     this.bot.on('webhook_error', (error) => {
-      console.error('Telegram webhook error:', error);
+      logger.error('Telegram webhook error', error, { component: 'telegram-bot' });
     });
 
     // Handle uncaught errors to prevent bot from crashing
     process.on('uncaughtException', (error) => {
-      console.error('Uncaught exception:', error);
+      logger.error('Uncaught exception in bot service', error, { component: 'telegram-bot' });
     });
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled rejection at:', promise, 'reason:', reason);
+      logger.error('Unhandled rejection in bot service', reason as Error, {
+        component: 'telegram-bot',
+        promise: promise.toString()
+      });
     });
   }
 
   async sendMessage(chatId: number, text: string, options?: TelegramBot.SendMessageOptions): Promise<void> {
     try {
       await this.bot.sendMessage(chatId, text, options);
+      logger.debug('Message sent successfully', { chatId, component: 'telegram-bot' });
     } catch (error) {
-      console.error(`Failed to send message to chat ${chatId}:`, error);
+      logger.error(`Failed to send message to chat ${chatId}`, error as Error, { chatId, component: 'telegram-bot' });
       throw error;
     }
   }
@@ -143,8 +148,22 @@ export class TelegramBotService {
         parse_mode: 'Markdown',
         disable_web_page_preview: false
       });
+
+      logger.info('Star notification sent successfully', {
+        chatId,
+        repository: repoFullName,
+        starsGained,
+        totalStars,
+        component: 'telegram-bot'
+      });
     } catch (error) {
-      console.error(`Failed to send star notification to chat ${chatId}:`, error);
+      logger.error(`Failed to send star notification to chat ${chatId}`, error as Error, {
+        chatId,
+        repository: repoFullName,
+        starsGained,
+        totalStars,
+        component: 'telegram-bot'
+      });
     }
   }
 
@@ -160,25 +179,27 @@ export class TelegramBotService {
         if (this.webhookService) {
           await this.webhookService.stop();
         }
-        console.log('Telegram bot webhook stopped');
+        logger.info('Telegram bot webhook stopped', { component: 'telegram-bot' });
       } else if (config.cron.externalEnabled && this.webhookService) {
         // Stop webhook server (used for external cron)
         await this.bot.deleteWebHook();
         await this.webhookService.stop();
-        console.log('Telegram bot polling and external cron server stopped');
+        logger.info('Telegram bot polling and external cron server stopped', { component: 'telegram-bot' });
       } else {
         // Stop polling
         await this.bot.stopPolling();
-        console.log('Telegram bot polling stopped');
+        logger.info('Telegram bot polling stopped', { component: 'telegram-bot' });
       }
     } catch (error) {
-      console.error('Error stopping bot:', error);
+      logger.error('Error stopping bot', error as Error, { component: 'telegram-bot' });
     }
   }
 
   async start(): Promise<void> {
+    const correlationId = logger.startOperation('telegram-bot-startup');
+
     try {
-      console.log(`Starting Telegram bot in ${this.isWebhookMode ? 'webhook' : 'polling'} mode...`);
+      logger.info(`Starting Telegram bot in ${this.isWebhookMode ? 'webhook' : 'polling'} mode`, { correlationId, component: 'telegram-bot' });
 
       // Set bot commands for better UX
       await this.bot.setMyCommands([
@@ -201,11 +222,19 @@ export class TelegramBotService {
           secret_token: config.telegram.webhookSecret || undefined,
         });
 
-        console.log(`Bot started successfully in webhook mode: @${botInfo.username}`);
-        console.log(`Webhook URL: ${config.telegram.webhookUrl}/webhook`);
+        logger.info(`Bot started successfully in webhook mode: @${botInfo.username}`, {
+          correlationId,
+          component: 'telegram-bot',
+          username: botInfo.username,
+          webhookUrl: `${config.telegram.webhookUrl}/webhook`,
+          externalCron: config.cron.externalEnabled
+        });
 
         if (config.cron.externalEnabled) {
-          console.log(`External cron endpoint available: ${config.telegram.webhookUrl}/poll`);
+          logger.info(`External cron endpoint available: ${config.telegram.webhookUrl}/poll`, {
+            correlationId,
+            component: 'telegram-bot'
+          });
         }
       } else if (config.cron.externalEnabled && this.webhookService) {
         // Start webhook server for external cron endpoint only
@@ -214,15 +243,25 @@ export class TelegramBotService {
         // Remove any existing webhook since we're using polling for Telegram
         await this.bot.deleteWebHook();
 
-        console.log(`Bot started successfully in polling mode with external cron: @${botInfo.username}`);
-        console.log(`External cron endpoint: http://localhost:${config.telegram.webhookPort}/poll`);
+        logger.info(`Bot started successfully in polling mode with external cron: @${botInfo.username}`, {
+          correlationId,
+          component: 'telegram-bot',
+          username: botInfo.username,
+          externalCronEndpoint: `http://localhost:${config.telegram.webhookPort}/poll`
+        });
       } else {
         // Remove any existing webhook
         await this.bot.deleteWebHook();
-        console.log(`Bot started successfully in polling mode: @${botInfo.username}`);
+        logger.info(`Bot started successfully in polling mode: @${botInfo.username}`, {
+          correlationId,
+          component: 'telegram-bot',
+          username: botInfo.username
+        });
       }
+      logger.endOperation(correlationId, true);
     } catch (error) {
-      console.error('Failed to start bot:', error);
+      logger.endOperation(correlationId, false);
+      logger.error('Failed to start bot', error as Error, { component: 'telegram-bot' });
       throw error;
     }
   }

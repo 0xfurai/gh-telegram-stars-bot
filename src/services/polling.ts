@@ -3,6 +3,7 @@ import { DatabaseService } from './database';
 import { GitHubService } from './github';
 import { TelegramBotService } from '../bot';
 import { config } from '../config';
+import { logger } from './logger';
 
 export interface StarChangeEvent {
   repositoryId: number;
@@ -31,31 +32,45 @@ export class PollingService {
 
   async pollRepositories(): Promise<StarChangeEvent[]> {
     if (this.isPolling) {
-      console.log('Polling already in progress, skipping...');
+      logger.warn('Polling already in progress, skipping', { component: 'polling' });
       return [];
     }
 
     this.isPolling = true;
-    const startTime = Date.now();
+    const correlationId = logger.startOperation('repository-polling');
     const starChangeEvents: StarChangeEvent[] = [];
 
     try {
-      console.log('Starting repository polling...');
+      logger.pollingOperation('Starting repository polling', { correlationId });
 
       const repositories = await this.db.getAllRepositories();
-      console.log(`Found ${repositories.length} repositories to check`);
+      logger.info(`Found ${repositories.length} repositories to check`, {
+        correlationId,
+        repositoryCount: repositories.length,
+        component: 'polling'
+      });
 
       if (repositories.length === 0) {
-        console.log('No repositories to poll');
+        logger.info('No repositories to poll', { correlationId, component: 'polling' });
         return [];
       }
 
       // Check rate limit before starting
       const rateLimitStatus = await this.github.getRateLimitStatus();
-      console.log(`GitHub API rate limit: ${rateLimitStatus.remaining}/${rateLimitStatus.limit}`);
+      logger.info('GitHub API rate limit status', {
+        correlationId,
+        remaining: rateLimitStatus.remaining,
+        limit: rateLimitStatus.limit,
+        component: 'polling'
+      });
 
       if (rateLimitStatus.remaining < repositories.length) {
-        console.warn(`Not enough API calls remaining (${rateLimitStatus.remaining}) for ${repositories.length} repositories. Skipping this cycle.`);
+        logger.warn(`Not enough API calls remaining for ${repositories.length} repositories. Skipping cycle`, {
+          correlationId,
+          remaining: rateLimitStatus.remaining,
+          required: repositories.length,
+          component: 'polling'
+        });
         return [];
       }
 
@@ -65,7 +80,13 @@ export class PollingService {
 
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
-        console.log(`Processing batch ${i + 1}/${batches.length} (${batch.length} repositories)`);
+        logger.debug(`Processing batch ${i + 1}/${batches.length}`, {
+          correlationId,
+          batchNumber: i + 1,
+          totalBatches: batches.length,
+          batchSize: batch.length,
+          component: 'polling'
+        });
 
         const batchPromises = batch.map(async (repo) => {
           try {
@@ -73,7 +94,12 @@ export class PollingService {
             const currentStars = await this.github.getRepositoryStarCount(owner, repoName);
 
             if (currentStars !== repo.stars_count) {
-              console.log(`⭐ Star count changed for ${repo.full_name}: ${repo.stars_count} → ${currentStars}`);
+              logger.githubOperation(`⭐ Star count changed for ${repo.full_name}`, repo.full_name, {
+                correlationId,
+                previousStars: repo.stars_count,
+                currentStars,
+                change: currentStars - repo.stars_count
+              });
 
               // Update repository in database
               await this.db.updateRepositoryStarsCount(repo.id, currentStars);
@@ -95,7 +121,11 @@ export class PollingService {
               }
             }
           } catch (error) {
-            console.error(`Error checking stars for ${repo.full_name}:`, error);
+            logger.error(`Error checking stars for ${repo.full_name}`, error as Error, {
+              correlationId,
+              repository: repo.full_name,
+              component: 'polling'
+            });
           }
         });
 
@@ -107,15 +137,16 @@ export class PollingService {
         }
       }
 
-      const endTime = Date.now();
-      const duration = (endTime - startTime) / 1000;
-
-      console.log(`Polling completed in ${duration}s. Found ${starChangeEvents.length} repositories with new stars.`);
+      logger.endOperation(correlationId, true, {
+        starChangeEvents: starChangeEvents.length,
+        repositoriesChecked: repositories.length
+      });
 
       return starChangeEvents;
 
     } catch (error) {
-      console.error('Error during polling:', error);
+      logger.endOperation(correlationId, false);
+      logger.error('Error during polling', error as Error, { correlationId, component: 'polling' });
       return [];
     } finally {
       this.isPolling = false;
@@ -127,12 +158,23 @@ export class PollingService {
       return;
     }
 
-    console.log(`Sending notifications for ${starChangeEvents.length} star change events...`);
+    const correlationId = logger.startOperation('notify-subscribers');
+    logger.info(`Sending notifications for ${starChangeEvents.length} star change events`, {
+      correlationId,
+      eventCount: starChangeEvents.length,
+      component: 'polling'
+    });
 
     for (const event of starChangeEvents) {
       try {
         const subscribers = await this.db.getSubscribersForRepository(event.repositoryId);
-        console.log(`Notifying ${subscribers.length} subscribers for ${event.fullName}`);
+        logger.info(`Notifying ${subscribers.length} subscribers for ${event.fullName}`, {
+          correlationId,
+          repository: event.fullName,
+          subscriberCount: subscribers.length,
+          starsGained: event.starsGained,
+          component: 'polling'
+        });
 
         const notificationPromises = subscribers.map(async (chatId) => {
           try {
@@ -144,56 +186,74 @@ export class PollingService {
               event.currentStars
             );
           } catch (error) {
-            console.error(`Failed to notify chat ${chatId}:`, error);
+            logger.error(`Failed to notify chat ${chatId}`, error as Error, {
+              correlationId,
+              chatId,
+              repository: event.fullName,
+              component: 'polling'
+            });
           }
         });
 
         await Promise.all(notificationPromises);
       } catch (error) {
-        console.error(`Error notifying subscribers for ${event.fullName}:`, error);
+        logger.error(`Error notifying subscribers for ${event.fullName}`, error as Error, {
+          correlationId,
+          repository: event.fullName,
+          component: 'polling'
+        });
       }
     }
+
+    logger.endOperation(correlationId, true);
   }
 
   async runPollingCycle(): Promise<void> {
+    const correlationId = logger.startOperation('polling-cycle');
     try {
       const starChangeEvents = await this.pollRepositories();
       await this.notifySubscribers(starChangeEvents);
+      logger.endOperation(correlationId, true, { starChangeEvents: starChangeEvents.length });
     } catch (error) {
-      console.error('Error in polling cycle:', error);
+      logger.endOperation(correlationId, false);
+      logger.error('Error in polling cycle', error as Error, { correlationId, component: 'polling' });
     }
   }
 
   startScheduledPolling(): void {
     if (this.cronJob) {
-      console.log('Polling is already scheduled');
+      logger.warn('Polling is already scheduled', { component: 'polling' });
       return;
     }
 
     const cronExpression = `*/${config.bot.pollingIntervalMinutes} * * * *`;
-    console.log(`Scheduling polling every ${config.bot.pollingIntervalMinutes} minutes (${cronExpression})`);
+    logger.info(`Scheduling polling every ${config.bot.pollingIntervalMinutes} minutes`, {
+      cronExpression,
+      intervalMinutes: config.bot.pollingIntervalMinutes,
+      component: 'polling'
+    });
 
     this.cronJob = cron.schedule(cronExpression, async () => {
-      console.log('🔄 Starting scheduled polling cycle...');
+      logger.info('🔄 Starting scheduled polling cycle', { component: 'polling' });
       await this.runPollingCycle();
     }, {
       scheduled: false,
     });
 
     this.cronJob.start();
-    console.log('✅ Scheduled polling started');
+    logger.info('✅ Scheduled polling started', { component: 'polling' });
   }
 
   stopScheduledPolling(): void {
     if (this.cronJob) {
       this.cronJob.stop();
       this.cronJob = null;
-      console.log('⏹️ Scheduled polling stopped');
+      logger.info('⏹️ Scheduled polling stopped', { component: 'polling' });
     }
   }
 
   async runImmediatePolling(): Promise<void> {
-    console.log('🔄 Running immediate polling cycle...');
+    logger.info('🔄 Running immediate polling cycle', { component: 'polling' });
     await this.runPollingCycle();
   }
 

@@ -29,6 +29,10 @@ export class WebhookService {
   }
 
   private setupRoutes(): void {
+    this.app.use('/', (req: Request, res: Response) => {
+      res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    });
+
     // Health check endpoint
     this.app.get('/health', (req: Request, res: Response) => {
       res.json({ status: 'ok', timestamp: new Date().toISOString() });

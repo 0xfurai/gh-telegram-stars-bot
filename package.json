@@ -1,0 +1,32 @@
+{
+  "name": "telegram-github-stars",
+  "version": "1.0.0",
+  "description": "Telegram bot to notify subscribers about new stars on GitHub repositories",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "watch": "ts-node --watch src/index.ts",
+    "test-polling": "ts-node scripts/test-polling.ts",
+    "test-db": "ts-node scripts/test-database.ts",
+    "troubleshoot": "ts-node scripts/troubleshoot.ts"
+  },
+  "keywords": ["telegram", "bot", "github", "stars", "notifications"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "@octokit/rest": "^20.0.2",
+    "dotenv": "^16.3.1",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/node-telegram-bot-api": "^0.64.7",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  }
+}

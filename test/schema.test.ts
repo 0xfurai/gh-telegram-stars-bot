@@ -8,13 +8,12 @@ function addChat(id: number) {
   return db.prepare("INSERT INTO chats (id) VALUES (?)").bind(id).run();
 }
 
-function addRepo(id: number, nodeId: string | null, stars = 100) {
+function addRepo(id: number, stars = 100) {
   return db
     .prepare(
-      `INSERT INTO repositories (id, github_node_id, full_name, html_url, stars_count)
-       VALUES (?, ?, ?, ?, ?)`,
+      "INSERT INTO repositories (id, github_node_id, full_name, stars_count) VALUES (?, ?, ?, ?)",
     )
-    .bind(id, nodeId, `owner/repo-${id}`, `https://github.com/owner/repo-${id}`, stars)
+    .bind(id, `R_${id}`, `owner/repo-${id}`, stars)
     .run();
 }
 
@@ -27,6 +26,17 @@ function subscribe(chatId: number, repoId: number, lastNotifiedStars = 100) {
     .run();
 }
 
+// The upsert the star check runs when it finds new stars.
+function recordGain(repoId: number, day: string, starsGained: number) {
+  return db
+    .prepare(
+      `INSERT INTO daily_star_gains (repository_id, day, stars_gained) VALUES (?, ?, ?)
+       ON CONFLICT (repository_id, day) DO UPDATE SET stars_gained = stars_gained + excluded.stars_gained`,
+    )
+    .bind(repoId, day, starsGained)
+    .run();
+}
+
 async function count(table: string): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>();
   return row?.n ?? 0;
@@ -34,7 +44,7 @@ async function count(table: string): Promise<number> {
 
 beforeEach(async () => {
   await db.batch([
-    db.prepare("DELETE FROM star_events"),
+    db.prepare("DELETE FROM daily_star_gains"),
     db.prepare("DELETE FROM chat_repositories"),
     db.prepare("DELETE FROM repositories"),
     db.prepare("DELETE FROM chats"),
@@ -42,24 +52,28 @@ beforeEach(async () => {
 });
 
 describe("schema", () => {
-  it("has exactly the expected tables and indexes", async () => {
+  it("has exactly the expected tables and indexes, automatic indexes included", async () => {
+    // Only D1's own tables, and their indexes, are left out (sqlite_sequence
+    // belongs to d1_migrations). SQLite's automatic indexes on our tables
+    // (from UNIQUE constraints) stay in, because they cost writes too.
     const { results } = await db
       .prepare(
         `SELECT type, name FROM sqlite_master
          WHERE type IN ('table', 'index')
-           AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations'
+           AND tbl_name NOT LIKE '\\_cf\\_%' ESCAPE '\\'
+           AND tbl_name NOT IN ('d1_migrations', 'sqlite_sequence')
          ORDER BY type, name`,
       )
       .all<{ type: string; name: string }>();
 
-    // A new index costs a written row on every write to its columns; adding
-    // one should be a deliberate change to this list.
+    // Each index costs a written row on every write to its columns. Adding one
+    // should be a deliberate change to this list.
     expect(results).toEqual([
       { type: "index", name: "idx_chat_repositories_repository_id" },
       { type: "table", name: "chat_repositories" },
       { type: "table", name: "chats" },
+      { type: "table", name: "daily_star_gains" },
       { type: "table", name: "repositories" },
-      { type: "table", name: "star_events" },
     ]);
   });
 });
@@ -87,23 +101,25 @@ describe("chats", () => {
 
 describe("repositories", () => {
   it("rejects a negative star count", async () => {
-    await expect(addRepo(1, "R_1", -1)).rejects.toThrow(/CHECK constraint failed/);
+    await expect(addRepo(1, -1)).rejects.toThrow(/CHECK constraint failed/);
   });
 
-  it("requires unique node IDs but allows several repos without one", async () => {
-    await addRepo(1, "R_1");
-    await expect(addRepo(2, "R_1")).rejects.toThrow(/UNIQUE constraint failed/);
+  it("compares names case-insensitively, like GitHub", async () => {
+    await addRepo(10);
 
-    await addRepo(3, null);
-    await addRepo(4, null);
-    expect(await count("repositories")).toBe(3);
+    const repo = await db
+      .prepare("SELECT id FROM repositories WHERE full_name = ?")
+      .bind("OWNER/Repo-10")
+      .first<{ id: number }>();
+
+    expect(repo?.id).toBe(10);
   });
 });
 
 describe("chat_repositories", () => {
   it("rejects subscriptions to a chat or repository that doesn't exist", async () => {
     await addChat(1);
-    await addRepo(10, "R_10");
+    await addRepo(10);
 
     await expect(subscribe(2, 10)).rejects.toThrow(/FOREIGN KEY constraint failed/);
     await expect(subscribe(1, 99)).rejects.toThrow(/FOREIGN KEY constraint failed/);
@@ -111,7 +127,7 @@ describe("chat_repositories", () => {
 
   it("rejects a second subscription to the same repository", async () => {
     await addChat(1);
-    await addRepo(10, "R_10");
+    await addRepo(10);
     await subscribe(1, 10);
 
     await expect(subscribe(1, 10)).rejects.toThrow(/UNIQUE constraint failed|PRIMARY KEY/);
@@ -120,7 +136,7 @@ describe("chat_repositories", () => {
   it("removes subscriptions when their chat is deleted", async () => {
     await addChat(1);
     await addChat(2);
-    await addRepo(10, "R_10");
+    await addRepo(10);
     await subscribe(1, 10);
     await subscribe(2, 10);
 
@@ -128,68 +144,86 @@ describe("chat_repositories", () => {
 
     expect(await count("chat_repositories")).toBe(1);
   });
-
-  it("removes subscriptions and star events when their repository is deleted", async () => {
-    await addChat(1);
-    await addRepo(10, "R_10");
-    await subscribe(1, 10);
-    await db
-      .prepare(
-        "INSERT INTO star_events (repository_id, stars_count, previous_stars_count) VALUES (10, 105, 100)",
-      )
-      .run();
-
-    await db.prepare("DELETE FROM repositories WHERE id = 10").run();
-
-    expect(await count("chat_repositories")).toBe(0);
-    expect(await count("star_events")).toBe(0);
-  });
 });
 
-describe("star_events", () => {
-  it("computes stars_gained from the two counts", async () => {
-    await addRepo(10, "R_10");
-    await db
-      .prepare(
-        "INSERT INTO star_events (repository_id, stars_count, previous_stars_count) VALUES (10, 105, 100)",
-      )
-      .run();
+describe("daily_star_gains", () => {
+  it("adds gains found on the same day to one row", async () => {
+    await addRepo(10);
 
-    const event = await db
-      .prepare("SELECT stars_gained, created_at FROM star_events")
-      .first<{ stars_gained: number; created_at: string }>();
+    await recordGain(10, "2026-11-07", 5);
+    await recordGain(10, "2026-11-07", 3);
+    await recordGain(10, "2026-11-08", 2);
 
-    expect(event?.stars_gained).toBe(5);
-    expect(event?.created_at).toMatch(ISO_UTC);
+    const { results } = await db
+      .prepare("SELECT day, stars_gained FROM daily_star_gains ORDER BY day")
+      .all<{ day: string; stars_gained: number }>();
+    expect(results).toEqual([
+      { day: "2026-11-07", stars_gained: 8 },
+      { day: "2026-11-08", stars_gained: 2 },
+    ]);
+  });
+
+  it("only accepts positive gains and YYYY-MM-DD days", async () => {
+    await addRepo(10);
+
+    await expect(recordGain(10, "2026-11-07", 0)).rejects.toThrow(/CHECK constraint failed/);
+    await expect(recordGain(10, "2026-11-07", -2)).rejects.toThrow(/CHECK constraint failed/);
+    await expect(recordGain(10, "7 Nov 2026", 1)).rejects.toThrow(/CHECK constraint failed/);
+  });
+
+  it("is removed with its repository, without scanning other repositories' rows", async () => {
+    await addChat(1);
+    await addRepo(10);
+    await addRepo(20);
+    await subscribe(1, 10);
+    await recordGain(10, "2026-11-07", 5);
+    await recordGain(10, "2026-11-08", 5);
+    // Plenty of unrelated rows that a scan would have to read.
+    await db.batch(
+      Array.from({ length: 90 }, (_, i) =>
+        db
+          .prepare("INSERT INTO daily_star_gains (repository_id, day, stars_gained) VALUES (20, ?, 1)")
+          .bind(new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10)),
+      ),
+    );
+
+    const deleted = await db.prepare("DELETE FROM repositories WHERE id = 10").run();
+
+    expect(await count("chat_repositories")).toBe(0);
+    expect(await count("daily_star_gains")).toBe(90);
+    expect(deleted.meta.rows_read).toBeLessThan(20);
   });
 });
 
 describe("write budget", () => {
-  // D1 bills rows written, including index entries. These are the writes the
-  // star check repeats every run, so they must stay at one row each.
-  it("costs one written row per star change and per star event", async () => {
+  // D1 bills rows written, index entries included. These writes repeat on
+  // every star check run (or on every new repository), so each must stay at
+  // one written row.
+  it("costs one written row per repeated write", async () => {
     await addChat(1);
-    await addRepo(10, "R_10");
+    const repoInsert = await addRepo(10);
     await subscribe(1, 10);
 
     const starUpdate = await db
       .prepare(
-        "UPDATE repositories SET stars_count = 105, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 10",
+        `UPDATE repositories
+         SET stars_count = 105, full_name = 'owner/renamed', github_node_id = 'R_new',
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = 10`,
       )
       .run();
-    const event = await db
-      .prepare(
-        "INSERT INTO star_events (repository_id, stars_count, previous_stars_count) VALUES (10, 105, 100)",
-      )
-      .run();
+    const firstGainToday = await recordGain(10, "2026-11-07", 5);
+    const laterGainToday = await recordGain(10, "2026-11-07", 3);
     const notified = await db
       .prepare(
         "UPDATE chat_repositories SET last_notified_stars = 105 WHERE chat_id = 1 AND repository_id = 10",
       )
       .run();
 
+    expect(repoInsert.meta.rows_written).toBe(1);
     expect(starUpdate.meta.rows_written).toBe(1);
-    expect(event.meta.rows_written).toBe(1);
+    expect(firstGainToday.meta.rows_written).toBe(1);
+    expect(laterGainToday.meta.rows_written).toBe(1);
     expect(notified.meta.rows_written).toBe(1);
   });
 });

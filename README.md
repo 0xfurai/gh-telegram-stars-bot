@@ -50,7 +50,12 @@ bunx wrangler d1 execute DB --local --command "SELECT * FROM chats"
 
 Tests apply the same migrations to a fresh database (`test/apply-migrations.ts`).
 
-D1 counts every written row, index entries included, and the free plan allows 100k rows written per day. `test/schema.test.ts` fixes the list of indexes and checks that the writes the star check repeats cost one row each. Add an index only when a query needs it.
+D1 bills rows written (index entries included) and rows read. The free plan allows 100k written and 5M read per day. So:
+
+* Add an index only when a query needs it: each one adds a written row to every write of its columns.
+* Keep tables that queries scan small. Star gains are stored per repository per day (`daily_star_gains`), not per event.
+
+`test/schema.test.ts` pins the list of tables and indexes, SQLite's automatic ones included, and checks that the writes the star check repeats cost one row each.
 
 ### Dependency install scripts
 

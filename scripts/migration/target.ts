@@ -61,17 +61,21 @@ export function targetErrorMessage(error: TargetError): string {
   }
 }
 
-/** wrangler's flags for a target. Production is wrangler.jsonc's top level, so it has no --env. */
-export function wranglerTargetArgs(target: D1Target): string[] {
-  const location = `--${target.location}`;
-  switch (target.environment) {
+/** wrangler's --env flag. Production is wrangler.jsonc's top level, so it has none. */
+export function wranglerEnvArgs(environment: Environment): string[] {
+  switch (environment) {
     case "production":
-      return [location];
+      return [];
     case "staging":
-      return [location, "--env", "staging"];
+      return ["--env", "staging"];
     default:
-      return assertNever(target.environment);
+      return assertNever(environment);
   }
+}
+
+/** wrangler's flags for a target: where, and which environment. */
+export function wranglerTargetArgs(target: D1Target): string[] {
+  return [`--${target.location}`, ...wranglerEnvArgs(target.environment)];
 }
 
 /** The copy scripts' own flags for a target, for the next-step commands they print. */

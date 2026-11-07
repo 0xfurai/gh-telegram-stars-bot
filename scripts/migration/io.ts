@@ -2,7 +2,7 @@
 // through wrangler. `fetch` and the command runner can be replaced in tests.
 import { chunk } from "../../src/chunk.ts";
 import { normalizeExport, type RawSupabaseExport } from "./normalize.ts";
-import { wranglerTargetArgs, type D1Target } from "./target.ts";
+import { wranglerEnvArgs, wranglerTargetArgs, type D1Target } from "./target.ts";
 import { SNAPSHOT_QUERIES, type D1Snapshot, type NodeIds, type SupabaseExport } from "./types.ts";
 
 const PAGE_SIZE = 1000;
@@ -180,12 +180,11 @@ export async function lookUpNodeIds(github: GitHub, githubIds: readonly number[]
 export type RunCommand = (command: string, args: readonly string[]) => Promise<string>;
 
 /**
- * Reads a D1Snapshot with one `wrangler d1 execute --json` call running all
- * four queries. One call, not four in parallel: local wrangler runs fail
- * when they overlap.
+ * Runs several queries in one `wrangler d1 execute --json` call and returns
+ * each query's rows. One call, not several in parallel: local wrangler runs
+ * fail when they overlap.
  */
-export async function readD1Snapshot(run: RunCommand, target: D1Target): Promise<D1Snapshot> {
-  const queries = [SNAPSHOT_QUERIES.chats, SNAPSHOT_QUERIES.repositories, SNAPSHOT_QUERIES.subscriptions, SNAPSHOT_QUERIES.gains];
+export async function readD1Queries(run: RunCommand, target: D1Target, queries: readonly string[]): Promise<unknown[][]> {
   const output = await run("bunx", [
     "wrangler",
     "d1",
@@ -200,11 +199,62 @@ export async function readD1Snapshot(run: RunCommand, target: D1Target): Promise
   if (results.length !== queries.length) {
     throw new Error(`Reading D1 returned ${results.length} results for ${queries.length} queries`);
   }
-  const [chats, repositories, subscriptions, gains] = results;
+  return results;
+}
+
+/** Reads a D1Snapshot: chats, repositories, subscriptions and gains. */
+export async function readD1Snapshot(run: RunCommand, target: D1Target): Promise<D1Snapshot> {
+  const [chats, repositories, subscriptions, gains] = await readD1Queries(run, target, [
+    SNAPSHOT_QUERIES.chats,
+    SNAPSHOT_QUERIES.repositories,
+    SNAPSHOT_QUERIES.subscriptions,
+    SNAPSHOT_QUERIES.gains,
+  ]);
   return {
     chats: chats as D1Snapshot["chats"],
     repositories: repositories as D1Snapshot["repositories"],
     subscriptions: subscriptions as D1Snapshot["subscriptions"],
     gains: gains as D1Snapshot["gains"],
   };
+}
+
+export interface CloudflareApi {
+  token: string;
+  accountId: string;
+  fetch?: typeof fetch;
+}
+
+/** The D1 database's ID, from `wrangler d1 info`. */
+export async function d1DatabaseId(run: RunCommand, target: D1Target): Promise<string> {
+  const output = await run("bunx", ["wrangler", "d1", "info", "DB", ...wranglerEnvArgs(target.environment), "--json"]);
+  return (JSON.parse(output) as { uuid: string }).uuid;
+}
+
+/** Rows D1 really wrote on each UTC day from `since` to `until`, from Cloudflare's analytics. */
+export async function d1RowsWrittenPerDay(
+  api: CloudflareApi,
+  databaseId: string,
+  days: { since: string; until: string },
+): Promise<{ date: string; rowsWritten: number }[]> {
+  const query = `query ($account: String!, $database: String!, $since: Date!, $until: Date!) {
+    viewer { accounts(filter: { accountTag: $account }) {
+      d1AnalyticsAdaptiveGroups(limit: 1000, filter: { databaseId: $database, date_geq: $since, date_leq: $until }) {
+        sum { rowsWritten } dimensions { date }
+      }
+    } }
+  }`;
+  const response = await (api.fetch ?? fetch)("https://api.cloudflare.com/client/v4/graphql", {
+    method: "POST",
+    headers: { authorization: `Bearer ${api.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ query, variables: { account: api.accountId, database: databaseId, ...days } }),
+  });
+  const body = (await (await checked(response, "Reading D1 analytics")).json()) as {
+    data?: { viewer: { accounts: { d1AnalyticsAdaptiveGroups: { sum: { rowsWritten: number }; dimensions: { date: string } }[] }[] } };
+    errors?: { message: string }[] | null;
+  };
+  const groups = body.data?.viewer.accounts[0]?.d1AnalyticsAdaptiveGroups;
+  if (!groups || (body.errors?.length ?? 0) > 0) {
+    throw new Error(`Reading D1 analytics failed: ${body.errors?.map((e) => e.message).join("; ") ?? "no data"}`);
+  }
+  return groups.map((group) => ({ date: group.dimensions.date, rowsWritten: group.sum.rowsWritten }));
 }

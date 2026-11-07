@@ -192,7 +192,7 @@ describe("Worker with invalid settings", () => {
   it("answers every request with 503", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    const response = worker.fetch(new Request("https://bot.test/health"), badEnv);
+    const response = await worker.fetch(new Request("https://bot.test/health"), badEnv);
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "Service misconfigured" });

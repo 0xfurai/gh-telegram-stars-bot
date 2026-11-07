@@ -17,7 +17,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typegen:check": "wrangler types --check"
+    "typegen:check": "wrangler types --check",
+    "telegram:setup": "node scripts/telegram-setup.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",
@@ -34,6 +35,7 @@
     "workerd"
   ],
   "dependencies": {
+    "grammy": "1.46.0",
     "zod": "4.6.7"
   }
 }

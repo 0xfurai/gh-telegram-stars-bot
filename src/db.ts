@@ -402,6 +402,29 @@ export async function markNotified(
     .run();
 }
 
+/**
+ * markNotified for several subscriptions in one batch (one D1 call), for a
+ * message that covered all of them.
+ */
+export async function markNotifiedMany(
+  db: D1Database,
+  items: readonly { chatId: number; repositoryId: number; starsCount: number }[],
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+  await db.batch(
+    items.map((item) =>
+      db
+        .prepare(
+          `UPDATE chat_repositories SET last_notified_stars = ?3
+           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars < ?3`,
+        )
+        .bind(item.chatId, item.repositoryId, item.starsCount),
+    ),
+  );
+}
+
 /** Deletes star gains older than `beforeDay` (YYYY-MM-DD). Returns rows deleted. */
 export async function pruneStarGains(db: D1Database, beforeDay: string): Promise<number> {
   const result = await db.prepare("DELETE FROM daily_star_gains WHERE day < ?").bind(beforeDay).run();

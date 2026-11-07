@@ -51,22 +51,23 @@ describe("scheduled", () => {
     vi.restoreAllMocks();
   });
 
-  it("runs the placeholder star check and logs the run", () => {
+  it("runs the star check and logs its summary", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const controller = createScheduledController({
       scheduledTime: new Date("2026-11-06T12:00:00Z"),
       cron: "*/5 * * * *",
     });
 
-    worker.scheduled(controller, env);
+    // No subscriptions in this test's database, so nothing calls GitHub or Telegram.
+    await worker.scheduled(controller, env);
 
-    expect(log).toHaveBeenCalledOnce();
-    const entry: unknown = JSON.parse(String(log.mock.calls[0]?.[0]));
-    expect(entry).toEqual({
-      message: "Star check placeholder ran",
-      cron: "*/5 * * * *",
-      scheduledTime: "2026-11-06T12:00:00.000Z",
+    const entry = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({
+      message: "Star check finished",
       notifications: "dry-run",
+      repositoriesChecked: 0,
+      githubRequests: 0,
+      messagesSent: 0,
     });
   });
 });

@@ -172,3 +172,33 @@ export function starNotification(fullName: string, gained: number, total: number
 export function plainTextHint(): string {
   return "Send me a GitHub repository (<code>owner/repo</code> or a URL) to subscribe, or /help to see what I can do.";
 }
+
+export interface StarUpdate {
+  fullName: string;
+  /** Stars gained since this chat was last told. */
+  gained: number;
+  total: number;
+}
+
+/** Most repositories in one notification, to stay well under Telegram's 4096 characters. */
+export const MAX_UPDATES_PER_MESSAGE = 20;
+
+/**
+ * One notification for a chat: a single repository, or several in one
+ * message. Takes 1 to MAX_UPDATES_PER_MESSAGE updates; callers split longer
+ * lists.
+ */
+export function starNotifications(updates: readonly StarUpdate[]): string {
+  if (updates.length === 0 || updates.length > MAX_UPDATES_PER_MESSAGE) {
+    throw new RangeError(`starNotifications takes 1-${MAX_UPDATES_PER_MESSAGE} updates, got ${updates.length}`);
+  }
+  const [only] = updates;
+  if (updates.length === 1 && only) {
+    return starNotification(only.fullName, only.gained, only.total);
+  }
+  return [
+    "🌟 <b>New stars!</b>",
+    "",
+    ...updates.map((u) => `📦 ${repositoryLink(u.fullName)}: +${number(u.gained)} (⭐ ${number(u.total)})`),
+  ].join("\n");
+}

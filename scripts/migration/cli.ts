@@ -1,6 +1,7 @@
 // Shared command-line helpers for the copy scripts (Node 24).
 import { execFile } from "node:child_process";
 import type { RunCommand } from "./io.ts";
+import { optionValue, parseD1Target, targetErrorMessage, type D1Target } from "./target.ts";
 import { gainsWindowStart, utcDay } from "./to-d1.ts";
 import type { CopyMode } from "./types.ts";
 
@@ -12,10 +13,9 @@ export function requiredEnv(name: string): string {
   return value;
 }
 
-/** `--name=value` from the command line. */
+/** `--name=value` or `--name value` from the command line. */
 export function option(name: string): string | undefined {
-  const prefix = `--${name}=`;
-  return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+  return optionValue(process.argv.slice(2), name) ?? undefined;
 }
 
 export function flag(name: string): boolean {
@@ -30,9 +30,16 @@ export function copyMode(): CopyMode {
   return mode;
 }
 
-/** Which D1 database wrangler talks to: --local for a dry run, remote by default. */
-export function d1Target(): "--remote" | "--local" {
-  return flag("local") ? "--local" : "--remote";
+/**
+ * The D1 database from `--env` (required) and `--local`. A bad command line
+ * ends the script here, the command-line edge, with the usage message.
+ */
+export function d1Target(): D1Target {
+  const target = parseD1Target(process.argv.slice(2));
+  if (!target.ok) {
+    throw new Error(targetErrorMessage(target.error));
+  }
+  return target.value;
 }
 
 /** `--today=YYYY-MM-DD` when given (the day the copy ran), otherwise today in UTC. */

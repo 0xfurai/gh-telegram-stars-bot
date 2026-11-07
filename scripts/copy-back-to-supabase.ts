@@ -1,18 +1,23 @@
 // Copies D1 back to Supabase, for a rollback to the old app (GSB-7, GSB-11).
 //
 //   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
-//     bun run migrate:copy-back -- [--dry-run] [--local]
+//     bun run migrate:copy-back -- --env=production [--dry-run] [--local]
 //
 // Copies chats, repositories with their current star counts, and
 // subscriptions (adding new ones, deleting removed ones). The star counts
 // matter: without them the old app would re-send every notification the
 // Worker already sent. Star gains aren't copied back.
 //
+// --env=production|staging  required: the D1 database to copy from.
+//            production: into production Supabase, for a real rollback.
+//            staging: only into a local scratch Supabase (supabase start),
+//            for the rehearsal; a hosted SUPABASE_URL is refused.
 // --dry-run  print what would change, write nothing.
 // --local    read the local D1 instead of the remote one.
-// Then verify: bun run migrate:verify -- --mode=shadow
+// Then verify: bun run migrate:verify -- --env=<same> --mode=shadow
 import { d1Target, flag, requiredEnv, runCommand, runMain } from "./migration/cli.ts";
 import { deleteSubscriptions, readD1Snapshot, selectAll, upsert, type Supabase } from "./migration/io.ts";
+import { checkCopyBackTarget, scriptTargetArgs } from "./migration/target.ts";
 import { planChatsAndRepositories, planSubscriptions, type SupabaseSubscriptionKey } from "./migration/to-supabase.ts";
 
 async function currentSupabaseState(supabase: Supabase) {
@@ -29,9 +34,16 @@ async function currentSupabaseState(supabase: Supabase) {
 async function main(): Promise<void> {
   const dryRun = flag("dry-run");
   const supabase = { url: requiredEnv("SUPABASE_URL"), serviceRoleKey: requiredEnv("SUPABASE_SERVICE_ROLE_KEY") };
-  const d1 = await readD1Snapshot(runCommand, d1Target());
+  const target = d1Target();
+  if (!checkCopyBackTarget(target, supabase.url).ok) {
+    throw new Error(
+      "Refusing to copy staging's D1 into a hosted Supabase: that would overwrite its chats and delete its " +
+        "subscriptions. For the rehearsal, point SUPABASE_URL at a local scratch Supabase (supabase start).",
+    );
+  }
+  const d1 = await readD1Snapshot(runCommand, target);
   const { chats, repositories } = planChatsAndRepositories(d1);
-  console.log(`D1: ${chats.length} chats, ${repositories.length} repositories, ${d1.subscriptions.length} subscriptions`);
+  console.log(`D1 (${target.environment}): ${chats.length} chats, ${repositories.length} repositories, ${d1.subscriptions.length} subscriptions`);
 
   if (!dryRun) {
     await upsert(supabase, "chats", "id", chats);
@@ -57,7 +69,7 @@ async function main(): Promise<void> {
 
   await upsert(supabase, "chat_repositories", "chat_id,repository_id", plan.add);
   await deleteSubscriptions(supabase, plan.remove);
-  console.log("Done. Verify with: bun run migrate:verify -- --mode=shadow");
+  console.log(`Done. Verify with: bun run migrate:verify -- ${scriptTargetArgs(target).join(" ")} --mode=shadow`);
 }
 
 runMain(main);

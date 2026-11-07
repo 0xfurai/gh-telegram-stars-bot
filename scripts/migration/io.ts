@@ -2,6 +2,7 @@
 // through wrangler. `fetch` and the command runner can be replaced in tests.
 import { chunk } from "../../src/chunk.ts";
 import { normalizeExport, type RawSupabaseExport } from "./normalize.ts";
+import { wranglerTargetArgs, type D1Target } from "./target.ts";
 import { SNAPSHOT_QUERIES, type D1Snapshot, type NodeIds, type SupabaseExport } from "./types.ts";
 
 const PAGE_SIZE = 1000;
@@ -14,10 +15,16 @@ export interface Supabase {
   fetch?: typeof fetch;
 }
 
+/**
+ * Supabase's newer secret keys (sb_secret_...) go in `apikey` only: they
+ * aren't JWTs, and the gateway turns them into one itself. The legacy
+ * service_role key is a JWT and goes in both headers.
+ */
 function supabaseHeaders(supabase: Supabase, extra: Record<string, string> = {}): Record<string, string> {
+  const key = supabase.serviceRoleKey;
   return {
-    apikey: supabase.serviceRoleKey,
-    authorization: `Bearer ${supabase.serviceRoleKey}`,
+    apikey: key,
+    ...(key.startsWith("sb_") ? {} : { authorization: `Bearer ${key}` }),
     "content-type": "application/json",
     ...extra,
   };
@@ -177,9 +184,18 @@ export type RunCommand = (command: string, args: readonly string[]) => Promise<s
  * four queries. One call, not four in parallel: local wrangler runs fail
  * when they overlap.
  */
-export async function readD1Snapshot(run: RunCommand, target: "--remote" | "--local"): Promise<D1Snapshot> {
+export async function readD1Snapshot(run: RunCommand, target: D1Target): Promise<D1Snapshot> {
   const queries = [SNAPSHOT_QUERIES.chats, SNAPSHOT_QUERIES.repositories, SNAPSHOT_QUERIES.subscriptions, SNAPSHOT_QUERIES.gains];
-  const output = await run("bunx", ["wrangler", "d1", "execute", "DB", target, "--json", "--command", queries.join("; ")]);
+  const output = await run("bunx", [
+    "wrangler",
+    "d1",
+    "execute",
+    "DB",
+    ...wranglerTargetArgs(target),
+    "--json",
+    "--command",
+    queries.join("; "),
+  ]);
   const results = (JSON.parse(output) as { results: unknown[] }[]).map((result) => result.results);
   if (results.length !== queries.length) {
     throw new Error(`Reading D1 returned ${results.length} results for ${queries.length} queries`);

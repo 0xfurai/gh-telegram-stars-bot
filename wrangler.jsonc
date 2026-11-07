@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gh-telegram-stars-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-19",
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    // Star check schedule.
+    "crons": ["*/5 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gh-telegram-stars-bot",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

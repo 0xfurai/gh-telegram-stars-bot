@@ -1,22 +1,18 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020", "DOM"],
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "types": [],
     "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "types": ["node"],
-    "moduleResolution": "node",
-    "allowSyntheticDefaultImports": true
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "scripts"]
+  "include": ["src", "worker-configuration.d.ts"]
 }

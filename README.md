@@ -1,6 +1,32 @@
 # Telegram GitHub Stars Bot
 
-A Telegram bot that notifies subscribers about new stars on GitHub repositories. Built with TypeScript, node-telegram-bot-api, and Supabase for data storage.
+A Telegram bot that notifies subscribers about new stars on GitHub repositories.
+
+> **Migration in progress.** `main` is being rebuilt as a Cloudflare Worker with D1.
+> Production still runs the old Node.js app from the [`legacy`](../../tree/legacy) branch.
+> The rest of this README describes the old app; its code is in `legacy/` for reference while it's ported.
+
+## Worker development
+
+Requires Node.js 22 or newer.
+
+```sh
+npm install
+npm run dev          # local Worker on http://localhost:8787 (GET /health)
+npm run dev:scheduled # same, plus GET /__scheduled to trigger the star check
+npm run typecheck
+npm run lint         # includes a complexity limit of 10 per function
+npm test             # Vitest inside the Workers runtime
+npm run typegen      # regenerate worker-configuration.d.ts after changing wrangler.jsonc
+```
+
+Local settings go in `.dev.vars` (not committed). Wrangler falls back to `.env` when `.dev.vars` doesn't exist, so keep a `.dev.vars` file even if it's empty.
+
+---
+
+## Old app (Node.js + Supabase)
+
+Built with TypeScript, node-telegram-bot-api, and Supabase for data storage.
 
 ## Features
 

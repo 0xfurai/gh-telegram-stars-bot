@@ -55,14 +55,20 @@ function lookupFailure(error: RepositoryLookupError, input: RepositoryName): str
   }
 }
 
-function subscribeReply(outcome: SubscribeOutcome, repo: Repository, maxReposPerChat: number): string {
+interface Reply {
+  text: string;
+  /** Show a link preview (only for a new subscription). */
+  preview: boolean;
+}
+
+function subscribeReply(outcome: SubscribeOutcome, repo: Repository, maxReposPerChat: number): Reply {
   switch (outcome) {
     case "subscribed":
-      return messages.subscribed(repo);
+      return { text: messages.subscribed(repo), preview: true };
     case "already-subscribed":
-      return messages.alreadySubscribed(repo.fullName);
+      return { text: messages.alreadySubscribed(repo.fullName), preview: false };
     case "limit-reached":
-      return messages.limitReached(maxReposPerChat);
+      return { text: messages.limitReached(maxReposPerChat), preview: false };
     case "unknown-repository":
       // The repository was stored just before; this would be a bug.
       throw new Error(`Repository ${repo.id} missing right after it was stored`);
@@ -71,17 +77,37 @@ function subscribeReply(outcome: SubscribeOutcome, repo: Repository, maxReposPer
   }
 }
 
+/** What the chat's own subscriptions already say about an /add. */
+type Precheck =
+  | { kind: "already-subscribed"; fullName: string }
+  | { kind: "limit-reached" }
+  | { kind: "look-up" };
+
 /**
  * Answers /add from the chat's own subscriptions when that's enough, before
  * any GitHub call or write: already subscribed (by name), or at the limit.
  */
-function answerFromSubscriptions(subscriptions: readonly Repository[], input: RepositoryName, max: number): string | null {
+function precheck(subscriptions: readonly Repository[], input: RepositoryName, max: number): Precheck {
   const wanted = `${input.owner}/${input.name}`.toLowerCase();
   const existing = subscriptions.find((repo) => repo.fullName.toLowerCase() === wanted);
   if (existing) {
-    return messages.alreadySubscribed(existing.fullName);
+    return { kind: "already-subscribed", fullName: existing.fullName };
   }
-  return subscriptions.length >= max ? messages.limitReached(max) : null;
+  return subscriptions.length >= max ? { kind: "limit-reached" } : { kind: "look-up" };
+}
+
+/** The reply when the precheck answers /add on its own, or null to look the repository up. */
+function precheckReply(check: Precheck, max: number): string | null {
+  switch (check.kind) {
+    case "already-subscribed":
+      return messages.alreadySubscribed(check.fullName);
+    case "limit-reached":
+      return messages.limitReached(max);
+    case "look-up":
+      return null;
+    default:
+      return assertNever(check);
+  }
 }
 
 function chatIdOf(ctx: Context): number {
@@ -99,11 +125,12 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
     if (args === "") {
       return replyHtml(ctx, messages.addUsage());
     }
-    const input = parseRepositoryInput(args);
-    if (input === null) {
-      return replyHtml(ctx, messages.invalidRepository());
+    const parsed = parseRepositoryInput(args);
+    if (!parsed.ok) {
+      return replyHtml(ctx, messages.invalidRepository(parsed.error));
     }
-    const early = answerFromSubscriptions(await listSubscriptions(deps.db, chatIdOf(ctx)), input, max);
+    const input = parsed.value;
+    const early = precheckReply(precheck(await listSubscriptions(deps.db, chatIdOf(ctx)), input, max), max);
     if (early !== null) {
       return replyHtml(ctx, early);
     }
@@ -112,18 +139,19 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
       return replyHtml(ctx, lookupFailure(found.error, input));
     }
     await upsertRepository(deps.db, found.value, utcDay(now()));
-    const outcome = await subscribe(deps.db, chatIdOf(ctx), found.value.id, max);
-    return replyHtml(ctx, subscribeReply(outcome, found.value, max), { preview: outcome === "subscribed" });
+    const reply = subscribeReply(await subscribe(deps.db, chatIdOf(ctx), found.value.id, max), found.value, max);
+    return replyHtml(ctx, reply.text, { preview: reply.preview });
   };
 
   const remove: CommandHandler = async (ctx, args) => {
     if (args === "") {
       return replyHtml(ctx, messages.removeUsage());
     }
-    const input = parseRepositoryInput(args);
-    if (input === null) {
-      return replyHtml(ctx, messages.invalidRepository());
+    const parsed = parseRepositoryInput(args);
+    if (!parsed.ok) {
+      return replyHtml(ctx, messages.invalidRepository(parsed.error));
     }
+    const input = parsed.value;
     const removed = await unsubscribe(deps.db, chatIdOf(ctx), `${input.owner}/${input.name}`);
     return replyHtml(
       ctx,
@@ -162,7 +190,5 @@ export async function handlePlainText(
   if (ctx.chat?.type !== "private") {
     return;
   }
-  return parseRepositoryInput(text) !== null
-    ? handlers.add(ctx, text)
-    : replyHtml(ctx, messages.plainTextHint());
+  return parseRepositoryInput(text).ok ? handlers.add(ctx, text) : replyHtml(ctx, messages.plainTextHint());
 }

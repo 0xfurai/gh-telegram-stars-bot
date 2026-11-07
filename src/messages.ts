@@ -7,6 +7,8 @@
 import { chunk } from "./chunk";
 import { COMMANDS } from "./command-list";
 import { repositoryUrl, type Repository, type Stats } from "./db";
+import type { RepositoryInputError } from "./repo-input";
+import { assertNever } from "./result";
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
 
@@ -76,8 +78,20 @@ export function removeUsage(): string {
   return "Send a repository with the command, for example <code>/remove microsoft/vscode</code>.";
 }
 
-export function invalidRepository(): string {
-  return "That doesn't look like a GitHub repository. Use <code>owner/repo</code> or a GitHub URL.";
+/** Why the input isn't a repository, in words. */
+export function invalidRepository(error: RepositoryInputError): string {
+  switch (error) {
+    case "empty":
+      return "Send a repository: <code>owner/repo</code> or a GitHub URL.";
+    case "not-github":
+      return "I only follow GitHub repositories. Send <code>owner/repo</code> or a <code>github.com</code> URL.";
+    case "invalid-name":
+      return "That isn't a valid GitHub repository name. Owners use letters, digits and single hyphens; repository names may also use <code>_</code> and <code>.</code>.";
+    case "not-a-repository":
+      return "That doesn't look like a GitHub repository. Use <code>owner/repo</code> or a GitHub URL.";
+    default:
+      return assertNever(error);
+  }
 }
 
 export function repositoryNotFound(owner: string, name: string): string {

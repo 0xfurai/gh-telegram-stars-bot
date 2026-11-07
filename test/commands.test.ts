@@ -190,7 +190,13 @@ describe("/add", () => {
 
   it("explains missing input and invalid names without calling GitHub", async () => {
     expect(await replyTo("/add")).toBe(messages.addUsage());
-    expect(await replyTo("/add not a repo", { github: "down" })).toBe(messages.invalidRepository());
+    expect(await replyTo("/add not a repo", { github: "down" })).toBe(messages.invalidRepository("not-a-repository"));
+  });
+
+  it("says why the input isn't a repository", async () => {
+    expect(await replyTo("/add https://gitlab.com/owner/repo")).toBe(messages.invalidRepository("not-github"));
+    expect(await replyTo("/add -owner/repo")).toBe(messages.invalidRepository("invalid-name"));
+    expect(await replyTo("/add https://github.com/owner")).toBe(messages.invalidRepository("not-a-repository"));
   });
 
   it("treats missing and private repositories as not found", async () => {
@@ -250,7 +256,7 @@ describe("/list, /remove and /stats", () => {
 
   it("explains missing or invalid input for /remove", async () => {
     expect(await replyTo("/remove")).toBe(messages.removeUsage());
-    expect(await replyTo("/remove nope")).toBe(messages.invalidRepository());
+    expect(await replyTo("/remove nope")).toBe(messages.invalidRepository("not-a-repository"));
   });
 
   it("shows stats", async () => {

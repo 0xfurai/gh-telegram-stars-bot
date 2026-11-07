@@ -5,12 +5,14 @@
 // failures are Results with a tagged error; callers switch over `kind`.
 import * as z from "zod/mini";
 import type { RepositoryInfo, RepositoryToCheck, StarCheckUpdate } from "./db";
-import { err, ok, type Result } from "./result";
+import { assertNever, err, ok, type Result } from "./result";
 
 const GRAPHQL_URL = "https://api.github.com/graphql";
 // GitHub requires a User-Agent. A generic name, no personal contact details.
 const USER_AGENT = "gh-telegram-stars-bot";
 export const MAX_NODES_PER_REQUEST = 100;
+// A hung request must not use up the whole scheduled run.
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface GitHubClient {
   token: string;
@@ -19,11 +21,17 @@ export interface GitHubClient {
 }
 
 export type GitHubError =
+  /** Primary or secondary rate limit; `resetAt` is when to try again, if GitHub said. */
   | { kind: "rate-limited"; resetAt: string | null }
+  /** 401: the token is wrong or expired. */
   | { kind: "unauthorized" }
+  /** 403 that isn't a rate limit: the token lacks access, or an SSO or abuse block. */
+  | { kind: "forbidden" }
   | { kind: "http"; status: number }
   | { kind: "graphql"; message: string }
   | { kind: "network"; message: string }
+  | { kind: "timeout" }
+  /** The response wasn't what the API documents. */
   | { kind: "bad-response" };
 
 export interface RateLimit {
@@ -33,19 +41,14 @@ export interface RateLimit {
 }
 
 /** A repository as GitHub returns it. */
-export interface RepositorySnapshot {
-  id: number;
-  nodeId: string;
-  fullName: string;
-  description: string | null;
-  starsCount: number;
-  isArchived: boolean;
-}
+export type RepositorySnapshot = RepositoryInfo;
 
 export interface RepositoryPage {
   repositories: RepositorySnapshot[];
-  /** Node IDs GitHub didn't return: deleted, private, or not a repository. */
+  /** Deleted, private, inaccessible (e.g. org IP allow list) or not a repository. */
   missingNodeIds: string[];
+  /** Repositories GitHub returned in a shape we don't understand. */
+  invalidNodeIds: string[];
   rateLimit: RateLimit;
 }
 
@@ -61,32 +64,23 @@ const repositorySchema = z.object({
   isPrivate: z.boolean(),
 });
 
-const rateLimitSchema = z.object({
-  remaining: z.number(),
-  resetAt: z.string(),
-  cost: z.number(),
-});
+const rateLimitSchema = z.object({ remaining: z.number(), resetAt: z.string(), cost: z.number() });
 
 const graphqlErrorSchema = z.object({
   type: z.optional(z.string()),
   message: z.string(),
+  path: z.optional(z.array(z.union([z.string(), z.number()]))),
 });
 
+type GraphqlError = z.output<typeof graphqlErrorSchema>;
+
 const nodesResponseSchema = z.object({
-  data: z.nullable(
-    z.optional(
-      z.object({
-        rateLimit: rateLimitSchema,
-        // Nodes that aren't repositories come back as {} (the fragment doesn't match).
-        nodes: z.array(z.nullable(z.union([repositorySchema, z.object({})]))),
-      }),
-    ),
-  ),
+  data: z.nullable(z.optional(z.object({ rateLimit: rateLimitSchema, nodes: z.array(z.unknown()) }))),
   errors: z.optional(z.array(graphqlErrorSchema)),
 });
 
 const repositoryResponseSchema = z.object({
-  data: z.nullable(z.optional(z.object({ repository: z.nullable(repositorySchema) }))),
+  data: z.nullable(z.optional(z.object({ repository: z.nullable(z.unknown()) }))),
   errors: z.optional(z.array(graphqlErrorSchema)),
 });
 
@@ -105,27 +99,53 @@ const REPOSITORY_QUERY = `query Repository($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) { ${REPOSITORY_FIELDS} }
 }`;
 
-function rateLimitReset(response: Response): string | null {
-  const reset = Number(response.headers.get("x-ratelimit-reset"));
-  return Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : null;
+interface GraphqlReply {
+  body: unknown;
+  headers: Headers;
+}
+
+/** When to retry, from x-ratelimit-reset (epoch seconds) or Retry-After (seconds). */
+function retryTime(headers: Headers): string | null {
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) {
+    return new Date(reset * 1000).toISOString();
+  }
+  const retryAfter = Number(headers.get("retry-after"));
+  return Number.isFinite(retryAfter) && retryAfter > 0 ? new Date(Date.now() + retryAfter * 1000).toISOString() : null;
+}
+
+function isRateLimited(headers: Headers): boolean {
+  return headers.get("x-ratelimit-remaining") === "0" || headers.has("retry-after");
 }
 
 function httpError(response: Response): GitHubError {
-  if (response.status === 401) {
-    return { kind: "unauthorized" };
+  switch (response.status) {
+    case 401:
+      return { kind: "unauthorized" };
+    case 403:
+      // GitHub also uses 403 for rate limits; its headers tell them apart.
+      return isRateLimited(response.headers)
+        ? { kind: "rate-limited", resetAt: retryTime(response.headers) }
+        : { kind: "forbidden" };
+    case 429:
+      return { kind: "rate-limited", resetAt: retryTime(response.headers) };
+    default:
+      return { kind: "http", status: response.status };
   }
-  // GitHub answers 403 or 429 when the primary or secondary rate limit is hit.
-  if (response.status === 403 || response.status === 429) {
-    return { kind: "rate-limited", resetAt: rateLimitReset(response) };
+}
+
+function fetchFailure(error: unknown): GitHubError {
+  if (error instanceof DOMException && error.name === "TimeoutError") {
+    return { kind: "timeout" };
   }
-  return { kind: "http", status: response.status };
+  return { kind: "network", message: error instanceof Error ? error.message : String(error) };
 }
 
 async function postGraphql(
   client: GitHubClient,
   query: string,
   variables: Record<string, unknown>,
-): Promise<Result<unknown, GitHubError>> {
+): Promise<Result<GraphqlReply, GitHubError>> {
   const fetchImpl = client.fetch ?? fetch;
   let response: Response;
   try {
@@ -137,34 +157,40 @@ async function postGraphql(
         "user-agent": USER_AGENT,
       },
       body: JSON.stringify({ query, variables }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    return err({ kind: "network", message: error instanceof Error ? error.message : String(error) });
+    return err(fetchFailure(error));
   }
 
   if (!response.ok) {
     return err(httpError(response));
   }
   try {
-    return ok(await response.json());
+    return ok({ body: await response.json(), headers: response.headers });
   } catch {
     return err({ kind: "bad-response" });
   }
 }
 
-/** A GraphQL error that isn't about one missing node fails the whole request. */
-function requestError(errors: readonly { type?: string; message: string }[] | undefined): GitHubError | null {
-  const fatal = (errors ?? []).find((error) => error.type !== "NOT_FOUND");
+/** Index of the node an error is about, if it's about one node (path ["nodes", i]). */
+function nodeIndex(error: GraphqlError): number | null {
+  const [field, index] = error.path ?? [];
+  return field === "nodes" && typeof index === "number" ? index : null;
+}
+
+/**
+ * An error about one node only affects that node. Any other error fails the
+ * whole request.
+ */
+function requestError(errors: readonly GraphqlError[] | undefined, headers: Headers): GitHubError | null {
+  const fatal = (errors ?? []).find((error) => error.type !== "NOT_FOUND" && nodeIndex(error) === null);
   if (!fatal) {
     return null;
   }
   return fatal.type === "RATE_LIMITED"
-    ? { kind: "rate-limited", resetAt: null }
+    ? { kind: "rate-limited", resetAt: retryTime(headers) }
     : { kind: "graphql", message: fatal.message };
-}
-
-function isRepository(node: unknown): node is RepositoryNode {
-  return node !== null && typeof node === "object" && "databaseId" in node;
 }
 
 function toSnapshot(node: RepositoryNode): RepositorySnapshot {
@@ -178,13 +204,52 @@ function toSnapshot(node: RepositoryNode): RepositorySnapshot {
   };
 }
 
-// --- Star check -----------------------------------------------------------------
+type NodeOutcome =
+  | { kind: "repository"; repository: RepositorySnapshot }
+  | { kind: "missing" }
+  | { kind: "invalid" };
 
 /**
- * Fetches up to 100 repositories by node ID in one request. Repositories that
- * are deleted or private (the bot never reports on private repositories, even
- * if the token can see them) are listed in `missingNodeIds`.
+ * null: deleted or inaccessible. An object without repository fields: not a
+ * repository (the fragment didn't match). Private repositories count as
+ * missing: the bot never reports on them, even if the token can see them.
  */
+function classifyNode(node: unknown): NodeOutcome {
+  if (node === null || typeof node !== "object" || Object.keys(node).length === 0) {
+    return { kind: "missing" };
+  }
+  const parsed = z.safeParse(repositorySchema, node);
+  if (!parsed.success) {
+    return { kind: "invalid" };
+  }
+  return parsed.data.isPrivate ? { kind: "missing" } : { kind: "repository", repository: toSnapshot(parsed.data) };
+}
+
+function pageFromNodes(nodeIds: readonly string[], nodes: readonly unknown[], rateLimit: RateLimit): RepositoryPage {
+  const page: RepositoryPage = { repositories: [], missingNodeIds: [], invalidNodeIds: [], rateLimit };
+  nodes.forEach((node, index) => {
+    const nodeId = nodeIds[index] ?? "";
+    const outcome = classifyNode(node);
+    switch (outcome.kind) {
+      case "repository":
+        page.repositories.push(outcome.repository);
+        break;
+      case "missing":
+        page.missingNodeIds.push(nodeId);
+        break;
+      case "invalid":
+        page.invalidNodeIds.push(nodeId);
+        break;
+      default:
+        assertNever(outcome);
+    }
+  });
+  return page;
+}
+
+// --- Star check -----------------------------------------------------------------
+
+/** Fetches up to 100 repositories by node ID in one request. */
 export async function fetchRepositoryPage(
   client: GitHubClient,
   nodeIds: readonly string[],
@@ -197,27 +262,21 @@ export async function fetchRepositoryPage(
   if (!posted.ok) {
     return posted;
   }
-  const parsed = z.safeParse(nodesResponseSchema, posted.value);
+  const parsed = z.safeParse(nodesResponseSchema, posted.value.body);
   if (!parsed.success) {
     return err({ kind: "bad-response" });
   }
 
   const { data, errors } = parsed.data;
-  const fatal = requestError(errors);
-  if (fatal || !data) {
-    return err(fatal ?? { kind: "bad-response" });
+  const fatal = requestError(errors, posted.value.headers);
+  if (fatal) {
+    return err(fatal);
   }
-
-  const repositories: RepositorySnapshot[] = [];
-  const missingNodeIds: string[] = [];
-  data.nodes.forEach((node, index) => {
-    if (isRepository(node) && !node.isPrivate) {
-      repositories.push(toSnapshot(node));
-    } else {
-      missingNodeIds.push(nodeIds[index] ?? "");
-    }
-  });
-  return ok({ repositories, missingNodeIds, rateLimit: data.rateLimit });
+  // GitHub returns exactly one node (or null) per requested ID, in order.
+  if (!data || data.nodes.length !== nodeIds.length) {
+    return err({ kind: "bad-response" });
+  }
+  return ok(pageFromNodes(nodeIds, data.nodes, data.rateLimit));
 }
 
 export interface StarCheckOptions {
@@ -230,7 +289,8 @@ export interface StarCheckOptions {
 export interface StarCheckResult {
   snapshots: RepositorySnapshot[];
   missingNodeIds: string[];
-  /** Where the next run should start: the last ID checked, or 0 after a full pass. */
+  invalidNodeIds: string[];
+  /** Where the next run should start: the last ID handled, or 0 after a full pass. */
   nextCursor: number;
   requests: number;
   rateLimit: RateLimit | null;
@@ -240,6 +300,7 @@ export interface StarCheckResult {
 
 /** Repositories starting after `cursor`, wrapping around, so every one gets its turn. */
 export function rotate(repositories: readonly RepositoryToCheck[], cursor: number): RepositoryToCheck[] {
+  // Sorted here too: the cursor logic depends on the order, and it's cheap.
   const sorted = [...repositories].sort((a, b) => a.id - b.id);
   const start = sorted.findIndex((repo) => repo.id > cursor);
   return start <= 0 ? sorted : [...sorted.slice(start), ...sorted.slice(0, start)];
@@ -253,6 +314,28 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
   return chunks;
 }
 
+/**
+ * Whether a failed page should be tried again next run (temporary failure) or
+ * skipped (it would fail the same way again and block every page after it).
+ */
+export function retryPage(error: GitHubError): boolean {
+  switch (error.kind) {
+    case "rate-limited":
+    case "unauthorized":
+    case "forbidden":
+    case "network":
+    case "timeout":
+      return true;
+    case "http":
+      return error.status >= 500;
+    case "graphql":
+    case "bad-response":
+      return false;
+    default:
+      return assertNever(error);
+  }
+}
+
 function budgetSpent(result: StarCheckResult, maxRequests: number): boolean {
   return result.requests >= maxRequests || result.rateLimit?.remaining === 0;
 }
@@ -260,6 +343,7 @@ function budgetSpent(result: StarCheckResult, maxRequests: number): boolean {
 function addPage(result: StarCheckResult, page: RepositoryPage): void {
   result.snapshots.push(...page.repositories);
   result.missingNodeIds.push(...page.missingNodeIds);
+  result.invalidNodeIds.push(...page.invalidNodeIds);
   result.rateLimit = page.rateLimit;
 }
 
@@ -276,24 +360,26 @@ export async function checkStars(
   const result: StarCheckResult = {
     snapshots: [],
     missingNodeIds: [],
+    invalidNodeIds: [],
     nextCursor: 0,
     requests: 0,
     rateLimit: null,
     error: null,
   };
-  let lastChecked = options.cursor;
+  let lastHandled = options.cursor;
 
   for (const page of chunk(rotate(repositories, options.cursor), MAX_NODES_PER_REQUEST)) {
     if (budgetSpent(result, options.maxRequests)) {
-      return { ...result, nextCursor: lastChecked };
+      return { ...result, nextCursor: lastHandled };
     }
     const fetched = await fetchRepositoryPage(client, page.map((repo) => repo.nodeId));
     result.requests += 1;
+    const pageEnd = page.at(-1)?.id ?? lastHandled;
     if (!fetched.ok) {
-      return { ...result, error: fetched.error, nextCursor: lastChecked };
+      return { ...result, error: fetched.error, nextCursor: retryPage(fetched.error) ? lastHandled : pageEnd };
     }
     addPage(result, fetched.value);
-    lastChecked = page.at(-1)?.id ?? lastChecked;
+    lastHandled = pageEnd;
   }
   // A full pass: the next run starts from the beginning.
   return result;
@@ -301,8 +387,8 @@ export async function checkStars(
 
 /**
  * The repositories whose stored data differs from what GitHub returned:
- * star count, name (renamed or transferred) or archived flag. Unchanged
- * repositories cost no writes.
+ * stars, name (renamed or transferred), description or archived flag.
+ * Unchanged repositories cost no writes.
  */
 export function starCheckUpdates(
   stored: readonly RepositoryToCheck[],
@@ -315,9 +401,18 @@ export function starCheckUpdates(
       before !== undefined &&
       (before.starsCount !== snapshot.starsCount ||
         before.fullName !== snapshot.fullName ||
+        before.description !== snapshot.description ||
         before.isArchived !== snapshot.isArchived);
     return changed
-      ? [{ id: snapshot.id, fullName: snapshot.fullName, starsCount: snapshot.starsCount, isArchived: snapshot.isArchived }]
+      ? [
+          {
+            id: snapshot.id,
+            fullName: snapshot.fullName,
+            description: snapshot.description,
+            starsCount: snapshot.starsCount,
+            isArchived: snapshot.isArchived,
+          },
+        ]
       : [];
   });
 }
@@ -339,15 +434,25 @@ export async function getRepository(
   if (!posted.ok) {
     return posted;
   }
-  const parsed = z.safeParse(repositoryResponseSchema, posted.value);
+  const parsed = z.safeParse(repositoryResponseSchema, posted.value.body);
   if (!parsed.success) {
     return err({ kind: "bad-response" });
   }
 
-  const fatal = requestError(parsed.data.errors);
+  // A missing repository comes back as NOT_FOUND with path ["repository"].
+  const fatal = requestError(parsed.data.errors, posted.value.headers);
   if (fatal) {
     return err(fatal);
   }
-  const node = parsed.data.data?.repository;
-  return node && !node.isPrivate ? ok(toSnapshot(node)) : err({ kind: "not-found" });
+  const outcome = classifyNode(parsed.data.data?.repository ?? null);
+  switch (outcome.kind) {
+    case "repository":
+      return ok(outcome.repository);
+    case "missing":
+      return err({ kind: "not-found" });
+    case "invalid":
+      return err({ kind: "bad-response" });
+    default:
+      return assertNever(outcome);
+  }
 }

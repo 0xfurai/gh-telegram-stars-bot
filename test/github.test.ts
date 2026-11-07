@@ -5,9 +5,11 @@ import {
   checkStars,
   fetchRepositoryPage,
   getRepository,
+  retryPage,
   rotate,
   starCheckUpdates,
   type GitHubClient,
+  type GitHubError,
 } from "../src/github";
 import { err } from "../src/result";
 
@@ -35,7 +37,7 @@ function fakeRepo(databaseId: number, overrides: Partial<FakeRepo> = {}): FakeRe
 }
 
 function stored(id: number, starsCount = 100 + id): RepositoryToCheck {
-  return { id, nodeId: `R_${id}`, fullName: `owner/repo-${id}`, starsCount, isArchived: false };
+  return { id, nodeId: `R_${id}`, fullName: `owner/repo-${id}`, description: null, starsCount, isArchived: false };
 }
 
 const RATE_LIMIT = { remaining: 4999, resetAt: "2026-11-07T05:00:00Z", cost: 1 };
@@ -88,6 +90,7 @@ describe("fetchRepositoryPage", () => {
           { id: 1, nodeId: "R_1", fullName: "owner/repo-1", description: "One", starsCount: 101, isArchived: false },
         ],
         missingNodeIds: ["R_2", "R_3"],
+        invalidNodeIds: [],
         rateLimit: RATE_LIMIT,
       },
     });
@@ -112,13 +115,37 @@ describe("fetchRepositoryPage", () => {
 
   it.each([
     [401, {}, { kind: "unauthorized" }],
-    [403, { "x-ratelimit-reset": "1793336400" }, { kind: "rate-limited", resetAt: new Date(1793336400 * 1000).toISOString() }],
+    [
+      403,
+      { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1793336400" },
+      { kind: "rate-limited", resetAt: new Date(1793336400 * 1000).toISOString() },
+    ],
+    [403, { "x-ratelimit-remaining": "4000" }, { kind: "forbidden" }],
+    [403, {}, { kind: "forbidden" }],
     [429, {}, { kind: "rate-limited", resetAt: null }],
     [502, {}, { kind: "http", status: 502 }],
   ])("maps HTTP %i to a typed error", async (status, headers, expected) => {
     const { client } = fakeGitHub(() => new Response("nope", { status, headers }));
 
     expect(await fetchRepositoryPage(client, ["R_1"])).toEqual(err(expected));
+  });
+
+  it("uses Retry-After for secondary rate limits", async () => {
+    const { client } = fakeGitHub(() => new Response("", { status: 403, headers: { "retry-after": "60" } }));
+
+    const result = await fetchRepositoryPage(client, ["R_1"]);
+
+    expect(!result.ok && result.error.kind).toBe("rate-limited");
+    expect(!result.ok && result.error.kind === "rate-limited" && result.error.resetAt).toMatch(/^\d{4}-/);
+  });
+
+  it("maps a timeout", async () => {
+    const timedOut: GitHubClient = {
+      token: "t",
+      fetch: () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError")),
+    };
+
+    expect(await fetchRepositoryPage(timedOut, ["R_1"])).toEqual(err({ kind: "timeout" }));
   });
 
   it("maps a network failure, a non-JSON body and an unexpected shape", async () => {
@@ -129,6 +156,50 @@ describe("fetchRepositoryPage", () => {
     expect(await fetchRepositoryPage(network, ["R_1"])).toEqual(err({ kind: "network", message: "connection reset" }));
     expect(await fetchRepositoryPage(html.client, ["R_1"])).toEqual(err({ kind: "bad-response" }));
     expect(await fetchRepositoryPage(shape.client, ["R_1"])).toEqual(err({ kind: "bad-response" }));
+  });
+
+  it("treats an error about one node (e.g. an org IP allow list) as that node missing", async () => {
+    const { client } = fakeGitHub(() =>
+      Response.json({
+        data: { rateLimit: RATE_LIMIT, nodes: [fakeRepo(1), null] },
+        errors: [{ type: "FORBIDDEN", path: ["nodes", 1], message: "IP allow list" }],
+      }),
+    );
+
+    const page = await fetchRepositoryPage(client, ["R_1", "R_2"]);
+
+    expect(page.ok && page.value.repositories.map((r) => r.id)).toEqual([1]);
+    expect(page.ok && page.value.missingNodeIds).toEqual(["R_2"]);
+  });
+
+  it("reports repositories in an unexpected shape as invalid, not missing", async () => {
+    const { client } = fakeGitHub(() =>
+      Response.json({ data: { rateLimit: RATE_LIMIT, nodes: [{ ...fakeRepo(1), databaseId: null }, fakeRepo(2)] } }),
+    );
+
+    const page = await fetchRepositoryPage(client, ["R_1", "R_2"]);
+
+    expect(page.ok && page.value.invalidNodeIds).toEqual(["R_1"]);
+    expect(page.ok && page.value.missingNodeIds).toEqual([]);
+  });
+
+  it("rejects a response with a different number of nodes than requested", async () => {
+    const { client } = fakeGitHub(() => Response.json({ data: { rateLimit: RATE_LIMIT, nodes: [fakeRepo(1)] } }));
+
+    expect(await fetchRepositoryPage(client, ["R_1", "R_2"])).toEqual(err({ kind: "bad-response" }));
+  });
+
+  it("takes the reset time of a GraphQL rate limit from the headers", async () => {
+    const { client } = fakeGitHub(() =>
+      Response.json(
+        { data: null, errors: [{ type: "RATE_LIMITED", message: "slow down" }] },
+        { headers: { "x-ratelimit-reset": "1793336400" } },
+      ),
+    );
+
+    expect(await fetchRepositoryPage(client, ["R_1"])).toEqual(
+      err({ kind: "rate-limited", resetAt: new Date(1793336400 * 1000).toISOString() }),
+    );
   });
 
   it("fails the request on GraphQL errors other than a missing node", async () => {
@@ -201,6 +272,18 @@ describe("checkStars", () => {
     expect(result.nextCursor).toBe(100);
   });
 
+  it("skips a page that would fail the same way again, so it can't block the pages after it", async () => {
+    const pages = nodesFrom(github(150));
+    const { client } = fakeGitHub((variables, call) =>
+      call === 1 ? Response.json({ data: null, errors: [{ message: "Something went wrong" }] }) : pages(variables),
+    );
+
+    const result = await checkStars(client, repos(150), { cursor: 0, maxRequests: 10 });
+
+    expect(result.error).toEqual({ kind: "graphql", message: "Something went wrong" });
+    expect(result.nextCursor).toBe(100);
+  });
+
   it("reports deleted repositories as missing without failing the run", async () => {
     const { client } = fakeGitHub(nodesFrom([fakeRepo(1)]));
 
@@ -218,6 +301,22 @@ describe("checkStars", () => {
 
     expect(calls).toEqual([]);
     expect(result.snapshots).toEqual([]);
+  });
+});
+
+describe("retryPage", () => {
+  it.each<[GitHubError, boolean]>([
+    [{ kind: "rate-limited", resetAt: null }, true],
+    [{ kind: "unauthorized" }, true],
+    [{ kind: "forbidden" }, true],
+    [{ kind: "network", message: "reset" }, true],
+    [{ kind: "timeout" }, true],
+    [{ kind: "http", status: 503 }, true],
+    [{ kind: "http", status: 422 }, false],
+    [{ kind: "graphql", message: "bad" }, false],
+    [{ kind: "bad-response" }, false],
+  ])("%j -> retry %s", (error, retry) => {
+    expect(retryPage(error)).toBe(retry);
   });
 });
 
@@ -246,20 +345,22 @@ describe("starCheckUpdates", () => {
     });
 
     const updates = starCheckUpdates(
-      [stored(1), stored(2), stored(3), stored(4)],
+      [stored(1), stored(2), stored(3), stored(4), stored(5)],
       [
         snapshot(1),
         snapshot(2, { starsCount: 150 }),
         snapshot(3, { fullName: "new-owner/renamed" }),
         snapshot(4, { isArchived: true }),
+        snapshot(5, { description: "New description" }),
         snapshot(9, { starsCount: 999 }),
       ],
     );
 
     expect(updates).toEqual([
-      { id: 2, fullName: "owner/repo-2", starsCount: 150, isArchived: false },
-      { id: 3, fullName: "new-owner/renamed", starsCount: 103, isArchived: false },
-      { id: 4, fullName: "owner/repo-4", starsCount: 104, isArchived: true },
+      { id: 2, fullName: "owner/repo-2", description: null, starsCount: 150, isArchived: false },
+      { id: 3, fullName: "new-owner/renamed", description: null, starsCount: 103, isArchived: false },
+      { id: 4, fullName: "owner/repo-4", description: null, starsCount: 104, isArchived: true },
+      { id: 5, fullName: "owner/repo-5", description: "New description", starsCount: 105, isArchived: false },
     ]);
   });
 });

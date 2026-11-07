@@ -42,6 +42,7 @@ export interface RepositoryToCheck {
   id: number;
   nodeId: string;
   fullName: string;
+  description: string | null;
   starsCount: number;
   isArchived: boolean;
 }
@@ -50,6 +51,7 @@ export interface RepositoryToCheck {
 export interface StarCheckUpdate {
   id: number;
   fullName: string;
+  description: string | null;
   starsCount: number;
   isArchived: boolean;
 }
@@ -181,7 +183,7 @@ export async function upsertRepository(db: D1Database, repo: RepositoryInfo, day
 export async function listRepositoriesToCheck(db: D1Database): Promise<RepositoryToCheck[]> {
   const { results } = await db
     .prepare(
-      `SELECT id, github_node_id, full_name, stars_count, is_archived FROM repositories r
+      `SELECT id, github_node_id, full_name, description, stars_count, is_archived FROM repositories r
        WHERE github_node_id IS NOT NULL
          AND EXISTS (
            SELECT 1 FROM chat_repositories cr JOIN chats c ON c.id = cr.chat_id
@@ -189,12 +191,20 @@ export async function listRepositoriesToCheck(db: D1Database): Promise<Repositor
          )
        ORDER BY id`,
     )
-    .all<{ id: number; github_node_id: string; full_name: string; stars_count: number; is_archived: number }>();
+    .all<{
+      id: number;
+      github_node_id: string;
+      full_name: string;
+      description: string | null;
+      stars_count: number;
+      is_archived: number;
+    }>();
 
   return results.map((row) => ({
     id: row.id,
     nodeId: row.github_node_id,
     fullName: row.full_name,
+    description: row.description,
     starsCount: row.stars_count,
     isArchived: row.is_archived === 1,
   }));
@@ -326,10 +336,11 @@ export async function recordStarCheck(
     recordGainStatement(db, update.id, update.starsCount, day),
     db
       .prepare(
-        `UPDATE repositories SET stars_count = ?2, full_name = ?3, is_archived = ?4, updated_at = ${NOW}
+        `UPDATE repositories
+         SET stars_count = ?2, full_name = ?3, description = ?4, is_archived = ?5, updated_at = ${NOW}
          WHERE id = ?1`,
       )
-      .bind(update.id, update.starsCount, update.fullName, update.isArchived ? 1 : 0),
+      .bind(update.id, update.starsCount, update.fullName, update.description, update.isArchived ? 1 : 0),
   ]);
   if (statements.length === 0) {
     return { rowsWritten: 0 };

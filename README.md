@@ -127,9 +127,13 @@ Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
 ## Monitoring
 
 * **Run log.** Every star check run is saved in `star_check_runs` (kept 7 days), with its summary as JSON.
-* **Failed runs.** A run fails when it throws (for example D1 is down) or GitHub couldn't be checked. Failed sends don't count: they're retried.
-  * A failed run also fails the Cron Trigger invocation, so Cloudflare shows it.
-  * It messages `ADMIN_CHAT_ID`, at most once an hour.
+* **Alerts** go to `ADMIN_CHAT_ID`, at most once an hour, when something needs a person:
+  * **At once:** GitHub rejected the token, or answered something unexpected (likely a bug). The Cron invocation fails too, so Cloudflare shows it.
+  * **Only when star checks go stale** (no successful run in 15 minutes): temporary problems such as rate limits, timeouts, or GitHub or D1 outages, and crashes. These usually heal by themselves.
+  * A run that hit a temporary GitHub error after making some progress counts as successful.
+  * Failed Telegram sends don't count: they're retried.
+  * A crash is rethrown with its original error, so Cloudflare's logs show the stack.
+  * If the alert can't be throttled (D1 down), it goes out anyway. If Telegram refuses it, the next failing run tries again.
 * **`GET /health/star-check`** answers 503 when the last successful run is more than 15 minutes old, or there hasn't been one yet. Point an uptime monitor (UptimeRobot, Better Stack) at it, checking every 5 minutes.
 * **`GET /health`** only checks that the Worker runs with valid settings. `telegram:setup` uses it.
 

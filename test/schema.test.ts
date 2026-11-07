@@ -70,6 +70,7 @@ describe("schema", () => {
     // should be a deliberate change to this list.
     expect(results).toEqual([
       { type: "index", name: "idx_chat_repositories_repository_id" },
+      { type: "index", name: "idx_star_check_runs_ok" },
       { type: "table", name: "chat_repositories" },
       { type: "table", name: "chats" },
       { type: "table", name: "daily_star_gains" },

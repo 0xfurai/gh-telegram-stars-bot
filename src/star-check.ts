@@ -29,6 +29,7 @@ import { checkStars, starCheckUpdates, type GitHubError } from "./github";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "./messages";
 import { assertNever } from "./result";
 import { send, type SendError } from "./telegram";
+import { errorMessage } from "./errors";
 
 /**
  * Subrequests a run may use. The free plan allows about 50 per invocation,
@@ -196,10 +197,6 @@ interface SendContext {
   summary: RunSummary;
   /** Chats deactivated or migrated during this run: their remaining messages are skipped. */
   unreachable: Set<number>;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**

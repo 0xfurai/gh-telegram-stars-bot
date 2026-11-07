@@ -1,41 +1,41 @@
 // Star check monitoring: the run log, freshness for /health/star-check, and
-// the admin alert on failed runs.
+// the admin alert.
 import { Api } from "grammy";
 import type { AppConfig } from "./config";
+import { errorMessage } from "./errors";
 import { html } from "./messages";
-import { assertNever, type Result } from "./result";
+import { assertNever } from "./result";
 import { send } from "./telegram";
 
 /** Three missed 5-minute runs. */
 export const STALE_AFTER_MS = 15 * 60 * 1000;
 const RUN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const ALERT_INTERVAL_MS = 60 * 60 * 1000;
+const TELEGRAM_TIMEOUT_SECONDS = 10;
 
-export interface RunFailure {
-  reason: string;
-  /** The run summary, if the run got far enough to produce one. */
-  summary: object | null;
+export interface RunRecord {
+  scheduledTime: number;
+  /** A successful run: it counts toward /health/star-check freshness. */
+  ok: boolean;
+  details: object;
 }
 
-/** A finished run: its summary, or why it failed. */
-export type RunOutcome = Result<object, RunFailure>;
-
-/** Saves one run. One written row. */
-export async function recordRun(db: D1Database, scheduledTime: number, outcome: RunOutcome): Promise<void> {
-  const details = outcome.ok ? outcome.value : outcome.error;
-  await db
+/**
+ * Saves one run, and on the first run of the day deletes runs older than
+ * 7 days, in one D1 call.
+ */
+export async function recordRun(db: D1Database, run: RunRecord, prune: { now: number } | null): Promise<void> {
+  const insert = db
     .prepare("INSERT INTO star_check_runs (scheduled_at, ok, summary) VALUES (?, ?, ?)")
-    .bind(new Date(scheduledTime).toISOString(), outcome.ok ? 1 : 0, JSON.stringify(details))
-    .run();
-}
-
-/** Deletes runs older than 7 days. Returns rows deleted. */
-export async function pruneRuns(db: D1Database, now: number): Promise<number> {
-  const result = await db
-    .prepare("DELETE FROM star_check_runs WHERE scheduled_at < ?")
-    .bind(new Date(now - RUN_RETENTION_MS).toISOString())
-    .run();
-  return result.meta.changes;
+    .bind(new Date(run.scheduledTime).toISOString(), run.ok ? 1 : 0, JSON.stringify(run.details));
+  const cleanup = prune
+    ? [
+        db
+          .prepare("DELETE FROM star_check_runs WHERE scheduled_at < ?")
+          .bind(new Date(prune.now - RUN_RETENTION_MS).toISOString()),
+      ]
+    : [];
+  await db.batch([insert, ...cleanup]);
 }
 
 export type StarCheckHealth =
@@ -45,7 +45,7 @@ export type StarCheckHealth =
 
 /**
  * Whether star checks are running: the last successful run must be within
- * STALE_AFTER_MS. Reads the newest rows by rowid, no scan.
+ * STALE_AFTER_MS. Both reads use the rowid or the partial index, no scan.
  */
 export async function starCheckHealth(db: D1Database, now: number): Promise<StarCheckHealth> {
   const [lastRun, lastSuccess] = await db.batch<{ ok: number; scheduled_at: string }>([
@@ -76,22 +76,59 @@ export function healthStatusCode(health: StarCheckHealth): number {
 
 export type AlertOutcome = "sent" | "no-admin-chat" | "throttled" | "not-delivered";
 
+type AlertSlot =
+  | { kind: "claimed"; at: string }
+  | { kind: "taken" }
+  /** D1 couldn't be asked: send anyway (fail open). An outage is exactly when the alert matters. */
+  | { kind: "unknown" };
+
 /**
- * Takes the hourly alert slot atomically: true if no alert went out in the
- * last hour, and records this one. Two failing runs can't both alert.
+ * Takes the hourly alert slot atomically, so two failing runs can't both
+ * alert.
  */
-async function claimAlertSlot(db: D1Database, now: number): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `UPDATE star_check_state SET last_alert_at = ?1
-       WHERE id = 1 AND (last_alert_at IS NULL OR last_alert_at < ?2)`,
-    )
-    .bind(new Date(now).toISOString(), new Date(now - ALERT_INTERVAL_MS).toISOString())
-    .run();
-  return result.meta.changes === 1;
+async function claimAlertSlot(db: D1Database, now: number): Promise<AlertSlot> {
+  const at = new Date(now).toISOString();
+  try {
+    const result = await db
+      .prepare(
+        `UPDATE star_check_state SET last_alert_at = ?1
+         WHERE id = 1 AND (last_alert_at IS NULL OR last_alert_at < ?2)`,
+      )
+      .bind(at, new Date(now - ALERT_INTERVAL_MS).toISOString())
+      .run();
+    return result.meta.changes === 1 ? { kind: "claimed", at } : { kind: "taken" };
+  } catch (error) {
+    console.error(JSON.stringify({ message: "Alert throttle unavailable; alerting anyway", error: errorMessage(error) }));
+    return { kind: "unknown" };
+  }
 }
 
-/** Messages ADMIN_CHAT_ID about a failed run, at most once an hour. */
+/** Gives the slot back after a failed send, so the next failing run can alert. */
+async function releaseAlertSlot(db: D1Database, slot: AlertSlot): Promise<void> {
+  switch (slot.kind) {
+    case "claimed":
+      await db
+        .prepare("UPDATE star_check_state SET last_alert_at = NULL WHERE id = 1 AND last_alert_at = ?")
+        .bind(slot.at)
+        .run();
+      return;
+    case "taken":
+    case "unknown":
+      return;
+    default:
+      assertNever(slot);
+  }
+}
+
+async function sendAlert(config: AppConfig, deps: { telegramFetch?: typeof fetch }, chatId: number, text: string) {
+  const api = new Api(config.telegramBotToken, {
+    timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
+    ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
+  });
+  return send(() => api.sendMessage(chatId, text, { parse_mode: "HTML" }));
+}
+
+/** Messages ADMIN_CHAT_ID, at most once an hour. */
 export async function alertAdmin(
   config: AppConfig,
   deps: { db: D1Database; telegramFetch?: typeof fetch },
@@ -102,19 +139,21 @@ export async function alertAdmin(
   if (adminChatId === null) {
     return "no-admin-chat";
   }
-  if (!(await claimAlertSlot(deps.db, now))) {
-    return "throttled";
+  const slot = await claimAlertSlot(deps.db, now);
+  switch (slot.kind) {
+    case "taken":
+      return "throttled";
+    case "claimed":
+    case "unknown":
+      break;
+    default:
+      return assertNever(slot);
   }
-  const api = new Api(config.telegramBotToken, deps.telegramFetch ? { fetch: deps.telegramFetch } : {});
-  const sent = await send(() =>
-    api.sendMessage(
-      adminChatId,
-      `⚠️ <b>Star check failed</b>\n\n${html(reason)}\n\nFurther failures in the next hour won't be reported.`,
-      { parse_mode: "HTML" },
-    ),
-  );
+  const text = `⚠️ <b>Star check problem</b>\n\n${html(reason)}\n\nFurther alerts in the next hour are held back.`;
+  const sent = await sendAlert(config, deps, adminChatId, text);
   if (!sent.ok) {
     console.error(JSON.stringify({ message: "Admin alert not delivered", error: sent.error }));
+    await releaseAlertSlot(deps.db, slot);
     return "not-delivered";
   }
   return "sent";

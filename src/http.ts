@@ -2,6 +2,7 @@ import { webhookCallback } from "grammy";
 import { createBot, type BotDeps } from "./bot";
 import type { AppConfig } from "./config";
 import { healthStatusCode, starCheckHealth } from "./monitoring";
+import { errorMessage } from "./errors";
 
 export interface RequestContext extends BotDeps {
   config: AppConfig;
@@ -67,7 +68,7 @@ async function handleWebhook(request: Request, context: RequestContext): Promise
     console.error(
       JSON.stringify({
         message: "Webhook request failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
     );
     return Response.json({ ok: false });

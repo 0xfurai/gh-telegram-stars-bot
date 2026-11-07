@@ -12,13 +12,16 @@
 // --local    read the local D1 instead of the remote one.
 // Then verify: bun run migrate:verify -- --mode=shadow
 import { d1Target, flag, requiredEnv, runCommand, runMain } from "./migration/cli.ts";
-import { deleteSubscription, readD1Snapshot, selectAll, upsert, type Supabase } from "./migration/io.ts";
+import { deleteSubscriptions, readD1Snapshot, selectAll, upsert, type Supabase } from "./migration/io.ts";
 import { planChatsAndRepositories, planSubscriptions, type SupabaseSubscriptionKey } from "./migration/to-supabase.ts";
 
 async function currentSupabaseState(supabase: Supabase) {
   const [repositories, subscriptions] = await Promise.all([
-    selectAll<{ id: number; github_id: number }>(supabase, "repositories", "id,github_id"),
-    selectAll<SupabaseSubscriptionKey>(supabase, "chat_repositories", "chat_id,repository_id"),
+    selectAll<{ id: number; github_id: number }>(supabase, "repositories", { columns: "id,github_id", order: "id" }),
+    selectAll<SupabaseSubscriptionKey>(supabase, "chat_repositories", {
+      columns: "chat_id,repository_id",
+      order: "chat_id,repository_id",
+    }),
   ]);
   return { repositories, subscriptions };
 }
@@ -38,19 +41,22 @@ async function main(): Promise<void> {
   const state = await currentSupabaseState(supabase);
   const plan = planSubscriptions(d1, state.repositories, state.subscriptions);
   console.log(`Subscriptions: ${plan.add.length} to add, ${plan.remove.length} to delete`);
-  if (plan.unmapped.length > 0) {
-    console.error(`Repositories without a Supabase ID: ${plan.unmapped.join(", ")}`);
-    process.exitCode = dryRun ? 0 : 1;
-  }
   if (dryRun) {
+    if (plan.unmapped.length > 0) {
+      console.log(`${plan.unmapped.length} repositories are new to Supabase; the real run adds them first.`);
+    }
     console.log("Dry run: nothing was written.");
+    return;
+  }
+  if (plan.unmapped.length > 0) {
+    // Writing the rest would leave Supabase with some subscriptions deleted and others missing.
+    console.error(`Repositories without a Supabase ID: ${plan.unmapped.join(", ")}. No subscriptions were changed.`);
+    process.exitCode = 1;
     return;
   }
 
   await upsert(supabase, "chat_repositories", "chat_id,repository_id", plan.add);
-  for (const sub of plan.remove) {
-    await deleteSubscription(supabase, sub.chat_id, sub.repository_id);
-  }
+  await deleteSubscriptions(supabase, plan.remove);
   console.log("Done. Verify with: bun run migrate:verify -- --mode=shadow");
 }
 

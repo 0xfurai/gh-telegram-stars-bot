@@ -7,9 +7,11 @@
 //               of gains.
 // --mode=shadow during the shadow run: chats, subscriptions and names only;
 //               star counts and gains are the Worker's own.
+// --today=YYYY-MM-DD  full only: the day the copy ran (copy-to-d1 prints it),
+//               so the 90-day gains window is the same one the copy used.
 // --local       read the local D1 (a dry run) instead of the remote one.
 // Read-only.
-import { copyMode, d1Target, requiredEnv, runCommand, runMain, today } from "./migration/cli.ts";
+import { copyMode, d1Target, requiredEnv, runCommand, runMain, starEventsSince, today } from "./migration/cli.ts";
 import { exportSupabase, readD1Snapshot } from "./migration/io.ts";
 import { compareCopies } from "./migration/verify.ts";
 
@@ -17,10 +19,12 @@ const SHOWN = 20;
 
 async function main(): Promise<void> {
   const mode = copyMode();
+  const day = today();
   const supabase = { url: requiredEnv("SUPABASE_URL"), serviceRoleKey: requiredEnv("SUPABASE_SERVICE_ROLE_KEY") };
-  const [source, d1] = await Promise.all([exportSupabase(supabase), readD1Snapshot(runCommand, d1Target())]);
+  const exportOptions = { starEventsSince: mode === "full" ? starEventsSince(day) : null, now: new Date().toISOString() };
+  const [source, d1] = await Promise.all([exportSupabase(supabase, exportOptions), readD1Snapshot(runCommand, d1Target())]);
 
-  const differences = compareCopies(source, d1, { mode, today: today() });
+  const differences = compareCopies(source, d1, { mode, today: day });
   if (differences.length === 0) {
     console.log(
       `Supabase and D1 match (${mode}): ${d1.chats.length} chats, ${d1.repositories.length} repositories, ` +

@@ -151,17 +151,18 @@ All three scripts need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; the copy 
 ```sh
 # 0. Before a full copy: a Supabase backup (pg_dump), kept outside the repo.
 
-# 1. Build the SQL. Only reads Supabase and GitHub; writes a file to your temp folder.
+# 1. Build the SQL. Only reads Supabase, GitHub and (shadow) D1; writes a file to your temp folder.
 bun run migrate:copy -- --mode=shadow     # daily during the shadow run
 bun run migrate:copy -- --mode=full       # the final copy at the switch
 
-# 2. Apply it (the script prints the exact command).
+# 2. Apply it (the script prints the exact commands, including step 3's).
 bunx wrangler d1 execute DB --remote --file <file>
 
 # 3. Verify: compares every chat, subscription and repository; fails on any difference.
-bun run migrate:verify -- --mode=shadow   # or --mode=full; --local for a dry run
+#    --today is the day the copy ran, so a copy just before midnight UTC verifies after it.
+bun run migrate:verify -- --mode=full --today=<day>   # or --mode=shadow; --local for a dry run
 
-# Rollback only: copy D1 back to Supabase (chats, subscriptions, current star counts).
+# Rollback only: copy D1 back to Supabase (chats, subscriptions, star counts).
 bun run migrate:copy-back -- --dry-run    # see what would change
 bun run migrate:copy-back
 bun run migrate:verify -- --mode=shadow
@@ -170,7 +171,11 @@ bun run migrate:verify -- --mode=shadow
 The two copy modes:
 
 * **`full`** makes D1 an exact copy of Supabase. Every subscription starts at Supabase's star count, and the last 90 days of star events become daily gains.
-* **`shadow`** mirrors chats and subscriptions, but keeps the star counts and gains the Worker tracks itself. New subscriptions start at D1's count.
+* **`shadow`** mirrors chats and subscriptions, but keeps the star counts and gains the Worker tracks itself. New subscriptions start at D1's count. It reads D1's current subscriptions first and writes only what differs (`--local` reads the local D1).
+
+During the final full copy and its verification, pause the Cron Trigger, so the Worker doesn't change star counts between the copy and the check.
+
+The copy back sends each repository's lowest count that any subscriber was last told. The old app keeps one count per repository, so gains that were still due get sent instead of lost; some subscribers may hear about them twice. If any repository still has no Supabase ID after the first step, it stops before changing any subscription.
 
 Repositories that are gone from GitHub, or private, are stored without a node ID and archived. GitHub IDs and Telegram chat IDs are the keys, so running a copy again updates rather than duplicates.
 

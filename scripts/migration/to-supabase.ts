@@ -32,11 +32,27 @@ export interface SupabaseSubscriptionKey {
   repository_id: number;
 }
 
-/** Step 1: chats and repositories (upserted on chats.id and repositories.github_id). */
+/** The lowest count any subscriber of each repository was last told, by GitHub ID. */
+function lowestNotified(d1: D1Snapshot): Map<number, number> {
+  const lowest = new Map<number, number>();
+  for (const sub of d1.subscriptions) {
+    lowest.set(sub.repository_id, Math.min(sub.last_notified_stars, lowest.get(sub.repository_id) ?? Infinity));
+  }
+  return lowest;
+}
+
+/**
+ * Step 1: chats and repositories (upserted on chats.id and
+ * repositories.github_id). The old app keeps one star count per repository,
+ * so each gets the lowest count any of its subscribers was last told: gains
+ * that are still due get sent by the old app (some subscribers may hear about
+ * them twice) instead of being lost.
+ */
 export function planChatsAndRepositories(d1: D1Snapshot): {
   chats: SupabaseChatWrite[];
   repositories: SupabaseRepositoryWrite[];
 } {
+  const lowest = lowestNotified(d1);
   return {
     chats: d1.chats.map((chat) => ({ id: chat.id, is_active: chat.is_active === 1 })),
     repositories: d1.repositories.map((repo) => ({
@@ -44,7 +60,7 @@ export function planChatsAndRepositories(d1: D1Snapshot): {
       full_name: repo.full_name,
       description: repo.description,
       html_url: repositoryUrl(repo.full_name),
-      stars_count: repo.stars_count,
+      stars_count: Math.min(repo.stars_count, lowest.get(repo.id) ?? repo.stars_count),
       is_archived: repo.is_archived === 1,
     })),
   };

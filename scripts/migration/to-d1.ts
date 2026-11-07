@@ -1,7 +1,16 @@
 // Builds the SQL that copies Supabase's data into D1. Pure: no I/O.
 import { chunk } from "../../src/chunk.ts";
 import { assertNever, err, ok, type Result } from "../../src/result.ts";
-import type { CopyMode, NodeIds, SupabaseExport, SupabaseRepository, SupabaseStarEvent } from "./types.ts";
+import type { D1Snapshot, NodeIds, SupabaseExport, SupabaseRepository, SupabaseStarEvent } from "./types.ts";
+
+/**
+ * full: the final copy at the switch (`today` sets the 90-day gains window).
+ * shadow: the daily copy during the shadow run; needs D1's current
+ * subscriptions, so only the pairs that differ are deleted or added.
+ */
+export type CopyOptions =
+  | { mode: "full"; today: string }
+  | { mode: "shadow"; current: D1Snapshot["subscriptions"] };
 
 /** Problems in the export that would break or corrupt the copy. */
 export type CopyProblem =
@@ -37,13 +46,18 @@ export function utcDay(value: string | number): string {
   return new Date(value).toISOString().slice(0, 10);
 }
 
+/** The first day of the 90-day gains window that ends on `today` (a UTC day). */
+export function gainsWindowStart(today: string): string {
+  return utcDay(Date.parse(today) - (RETENTION_DAYS - 1) * DAY_MS);
+}
+
 /** Star events summed per GitHub repository and UTC day, positive gains only, last 90 days. */
 export function dailyGains(
   events: readonly SupabaseStarEvent[],
   githubIdOf: ReadonlyMap<number, number>,
   today: string,
 ): { githubId: number; day: string; starsGained: number }[] {
-  const since = utcDay(Date.parse(today) - (RETENTION_DAYS - 1) * DAY_MS);
+  const since = gainsWindowStart(today);
   const totals = new Map<string, number>();
   for (const event of events) {
     const githubId = githubIdOf.get(event.repository_id);
@@ -142,36 +156,62 @@ function fullCopy(data: SupabaseExport, nodeIds: NodeIds, today: string): string
   ];
 }
 
+const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
+function pairKey(chatId: number, repositoryId: number): string {
+  return `${chatId}|${repositoryId}`;
+}
+
+/** Deletes exactly the subscriptions D1 has and Supabase doesn't, 100 pairs per statement. */
+function removedSubscriptions(pairs: readonly { chatId: number; githubId: number }[], current: D1Snapshot["subscriptions"]): string[] {
+  const wanted = new Set(pairs.map((p) => pairKey(p.chatId, p.githubId)));
+  const removed = current
+    .filter((sub) => !wanted.has(pairKey(sub.chat_id, sub.repository_id)))
+    .map((sub) => `(${sqlInteger(sub.chat_id)}, ${sqlInteger(sub.repository_id)})`);
+  return chunk(removed, ROWS_PER_INSERT).map(
+    (part) => `DELETE FROM chat_repositories WHERE (chat_id, repository_id) IN (VALUES ${part.join(", ")});`,
+  );
+}
+
+/** Adds the subscriptions Supabase has and D1 doesn't, at D1's current star count. */
+function addedSubscriptions(pairs: readonly { chatId: number; githubId: number; createdAt: string }[], current: D1Snapshot["subscriptions"]): string[] {
+  const existing = new Set(current.map((sub) => pairKey(sub.chat_id, sub.repository_id)));
+  return pairs
+    .filter((p) => !existing.has(pairKey(p.chatId, p.githubId)))
+    .map(
+      (p) =>
+        `INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars, created_at) ` +
+        `SELECT ${sqlInteger(p.chatId)}, id, stars_count, ${sqlTimestamp(p.createdAt)} FROM repositories WHERE id = ${sqlInteger(p.githubId)} ` +
+        `ON CONFLICT (chat_id, repository_id) DO NOTHING;`,
+    );
+}
+
 /**
  * Shadow copy: mirror chats and subscriptions, keep the star counts and
- * gains the Worker tracks. New subscriptions start at D1's current count.
+ * gains the Worker tracks. Rows (and updated_at) change only when a value
+ * does, which also saves D1 writes.
  */
-function shadowCopy(data: SupabaseExport, nodeIds: NodeIds): string[] {
+function shadowCopy(data: SupabaseExport, nodeIds: NodeIds, current: D1Snapshot["subscriptions"]): string[] {
   const pairs = subscriptionPairs(data);
-  const keep = pairs.map((s) => `(${sqlInteger(s.chatId)}, ${sqlInteger(s.githubId)})`);
-  const removeOthers =
-    keep.length === 0
-      ? "DELETE FROM chat_repositories;"
-      : `DELETE FROM chat_repositories WHERE (chat_id, repository_id) NOT IN (VALUES ${keep.join(", ")});`;
   return [
     ...insertRows(
       "INSERT INTO chats (id, is_active, created_at, updated_at)",
       chatRows(data),
-      "\nON CONFLICT (id) DO UPDATE SET is_active = excluded.is_active",
+      `\nON CONFLICT (id) DO UPDATE SET is_active = excluded.is_active, updated_at = ${NOW} ` +
+        "WHERE chats.is_active <> excluded.is_active",
     ),
     ...insertRows(
       REPOSITORY_COLUMNS,
       data.repositories.map((repo) => `(${repositoryRow(repo, nodeIds)})`),
       "\nON CONFLICT (id) DO UPDATE SET github_node_id = excluded.github_node_id, full_name = excluded.full_name, " +
-        "description = excluded.description, is_archived = excluded.is_archived",
+        `description = excluded.description, is_archived = excluded.is_archived, updated_at = ${NOW} ` +
+        "WHERE repositories.github_node_id IS NOT excluded.github_node_id " +
+        "OR repositories.full_name IS NOT excluded.full_name COLLATE BINARY " +
+        "OR repositories.description IS NOT excluded.description " +
+        "OR repositories.is_archived <> excluded.is_archived",
     ),
-    removeOthers,
-    ...pairs.map(
-      (s) =>
-        `INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars, created_at) ` +
-        `SELECT ${sqlInteger(s.chatId)}, id, stars_count, ${sqlTimestamp(s.createdAt)} FROM repositories WHERE id = ${sqlInteger(s.githubId)} ` +
-        `ON CONFLICT (chat_id, repository_id) DO NOTHING;`,
-    ),
+    ...removedSubscriptions(pairs, current),
+    ...addedSubscriptions(pairs, current),
   ];
 }
 
@@ -182,7 +222,7 @@ function shadowCopy(data: SupabaseExport, nodeIds: NodeIds): string[] {
 export function buildD1Statements(
   data: SupabaseExport,
   nodeIds: NodeIds,
-  options: { mode: CopyMode; today: string },
+  options: CopyOptions,
 ): Result<string[], CopyProblem[]> {
   const problems = findProblems(data, nodeIds);
   return problems.length > 0 ? err(problems) : ok(statementsFor(data, nodeIds, options));
@@ -192,7 +232,7 @@ export function buildD1Statements(
 export function buildD1Sql(
   data: SupabaseExport,
   nodeIds: NodeIds,
-  options: { mode: CopyMode; today: string },
+  options: CopyOptions,
 ): Result<string, CopyProblem[]> {
   const statements = buildD1Statements(data, nodeIds, options);
   return statements.ok
@@ -200,13 +240,13 @@ export function buildD1Sql(
     : statements;
 }
 
-function statementsFor(data: SupabaseExport, nodeIds: NodeIds, options: { mode: CopyMode; today: string }): string[] {
+function statementsFor(data: SupabaseExport, nodeIds: NodeIds, options: CopyOptions): string[] {
   switch (options.mode) {
     case "full":
       return fullCopy(data, nodeIds, options.today);
     case "shadow":
-      return shadowCopy(data, nodeIds);
+      return shadowCopy(data, nodeIds, options.current);
     default:
-      return assertNever(options.mode);
+      return assertNever(options);
   }
 }

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildD1Statements, dailyGains } from "../scripts/migration/to-d1";
+import { buildD1Statements, dailyGains, type CopyOptions } from "../scripts/migration/to-d1";
 import { planChatsAndRepositories, planSubscriptions } from "../scripts/migration/to-supabase";
 import { SNAPSHOT_QUERIES, type D1Snapshot, type SupabaseExport } from "../scripts/migration/types";
 import { compareCopies } from "../scripts/migration/verify";
@@ -61,8 +61,11 @@ async function snapshot(): Promise<D1Snapshot> {
   };
 }
 
-function statements(data: SupabaseExport, mode: "full" | "shadow"): string[] {
-  const built = buildD1Statements(data, NODE_IDS, { mode, today: TODAY });
+/** The copy's statements; a shadow copy is built against D1's current subscriptions, as the script does. */
+async function statements(data: SupabaseExport, mode: "full" | "shadow"): Promise<string[]> {
+  const options: CopyOptions =
+    mode === "full" ? { mode, today: TODAY } : { mode, current: (await snapshot()).subscriptions };
+  const built = buildD1Statements(data, NODE_IDS, options);
   if (!built.ok) {
     throw new Error(JSON.stringify(built.error));
   }
@@ -81,13 +84,13 @@ beforeEach(async () => {
 
 describe("full copy", () => {
   it("makes D1 an exact copy, and the verification finds no differences", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
 
     expect(compareCopies(exportFixture(), await snapshot(), { mode: "full", today: TODAY })).toEqual([]);
   });
 
   it("starts every subscription at Supabase's star count, so nobody gets old stars", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
 
     const { subscriptions } = await snapshot();
     expect(subscriptions).toContainEqual({ chat_id: 1, repository_id: 10, last_notified_stars: 230000 });
@@ -95,7 +98,7 @@ describe("full copy", () => {
   });
 
   it("keeps GitHub IDs as keys, inactive chats inactive, and stores repos gone from GitHub as archived", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
 
     const { chats, repositories } = await snapshot();
     expect(chats.find((c) => c.id === 3)?.is_active).toBe(0);
@@ -105,14 +108,14 @@ describe("full copy", () => {
   });
 
   it("rebuilds daily star gains from the last 90 days of increases", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
 
     expect((await snapshot()).gains).toEqual([{ repository_id: 10, day: "2026-11-07", stars_gained: 20 }]);
   });
 
   it("is safe to run twice", async () => {
-    await apply(statements(exportFixture(), "full"));
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
 
     expect(compareCopies(exportFixture(), await snapshot(), { mode: "full", today: TODAY })).toEqual([]);
   });
@@ -120,7 +123,7 @@ describe("full copy", () => {
 
 describe("shadow copy", () => {
   it("mirrors chats and subscriptions but keeps the star counts the Worker tracks", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
     // The Worker checked GitHub since: new counts and a gain.
     await db.prepare("UPDATE repositories SET stars_count = 230050 WHERE id = 10").run();
     await db.prepare("INSERT INTO daily_star_gains (repository_id, day, stars_gained) VALUES (10, '2026-11-08', 50)").run();
@@ -131,7 +134,7 @@ describe("shadow copy", () => {
     changed.subscriptions.push({ chat_id: 3, repository_id: 1, created_at: T });
     changed.chats = changed.chats.map((c) => (c.id === 3 ? { ...c, is_active: true } : c));
 
-    await apply(statements(changed, "shadow"));
+    await apply(await statements(changed, "shadow"));
 
     const after = await snapshot();
     expect(after.repositories.find((r) => r.id === 10)?.stars_count).toBe(230050);
@@ -143,12 +146,46 @@ describe("shadow copy", () => {
   });
 
   it("handles a Supabase with no subscriptions left", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
     const empty = { ...exportFixture(), subscriptions: [] };
 
-    await apply(statements(empty, "shadow"));
+    await apply(await statements(empty, "shadow"));
 
     expect((await snapshot()).subscriptions).toEqual([]);
+  });
+
+  it("deletes exactly the removed subscriptions, however many", async () => {
+    const many = exportFixture();
+    for (let id = 100; id < 350; id++) {
+      many.chats.push({ id, is_active: true, created_at: T, updated_at: T });
+      many.subscriptions.push({ chat_id: id, repository_id: 1, created_at: T });
+    }
+    await apply(await statements(many, "full"));
+    // Every other one unsubscribed.
+    const fewer = { ...many, subscriptions: many.subscriptions.filter((s) => s.chat_id < 100 || s.chat_id % 2 === 0) };
+
+    const built = await statements(fewer, "shadow");
+    await apply(built);
+
+    expect(built.filter((sql) => sql.startsWith("DELETE")).length).toBe(2);
+    expect(compareCopies(fewer, await snapshot(), { mode: "shadow", today: TODAY })).toEqual([]);
+  });
+
+  it("only rewrites rows, and their updated_at, when something changed", async () => {
+    await apply(await statements(exportFixture(), "full"));
+    await db.prepare("UPDATE chats SET updated_at = 'before'").run();
+    await db.prepare("UPDATE repositories SET updated_at = 'before'").run();
+    const changed = exportFixture();
+    changed.chats = changed.chats.map((c) => (c.id === 3 ? { ...c, is_active: true } : c));
+    changed.repositories = changed.repositories.map((r) => (r.id === 1 ? { ...r, full_name: "Facebook/React" } : r));
+
+    await apply(await statements(changed, "shadow"));
+
+    const chats = await db.prepare("SELECT id, updated_at FROM chats ORDER BY id").all<{ id: number; updated_at: string }>();
+    const repos = await db.prepare("SELECT id, updated_at FROM repositories ORDER BY id").all<{ id: number; updated_at: string }>();
+    expect(chats.results.filter((c) => c.updated_at !== "before").map((c) => c.id)).toEqual([3]);
+    // A change in letter case alone is a rename too.
+    expect(repos.results.filter((r) => r.updated_at !== "before").map((r) => r.id)).toEqual([10]);
   });
 });
 
@@ -174,7 +211,7 @@ describe("problems in the export", () => {
 
 describe("compareCopies", () => {
   it("reports each difference", async () => {
-    await apply(statements(exportFixture(), "full"));
+    await apply(await statements(exportFixture(), "full"));
     await db.batch([
       db.prepare("UPDATE repositories SET full_name = 'facebook/renamed', stars_count = 1 WHERE id = 10"),
       db.prepare("DELETE FROM chat_repositories WHERE chat_id = 1 AND repository_id = 20"),
@@ -228,7 +265,7 @@ describe("reverse copy plan", () => {
     gains: [],
   };
 
-  it("copies chats and repositories with their current star counts", () => {
+  it("copies chats and repositories with their star counts", () => {
     const plan = planChatsAndRepositories(d1);
 
     expect(plan.chats).toEqual([
@@ -243,6 +280,25 @@ describe("reverse copy plan", () => {
       stars_count: 230050,
       is_archived: false,
     });
+  });
+
+  it("sends back the lowest count any subscriber was last told, so due gains aren't lost", () => {
+    const behind: D1Snapshot = {
+      ...d1,
+      subscriptions: [
+        { chat_id: 1, repository_id: 10, last_notified_stars: 230050 },
+        // Chat 2's notification failed: still due.
+        { chat_id: 2, repository_id: 10, last_notified_stars: 230010 },
+      ],
+    };
+
+    const stars = planChatsAndRepositories(behind).repositories.map((r) => [r.github_id, r.stars_count]);
+
+    // Repository 40 has no subscribers left: its own count.
+    expect(stars).toEqual([
+      [10, 230010],
+      [40, 3],
+    ]);
   });
 
   it("adds subscriptions made after the switch and removes ones deleted since", () => {

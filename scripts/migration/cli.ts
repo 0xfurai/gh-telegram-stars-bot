@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import type { RunCommand } from "./io.ts";
 import { optionValue, parseD1Target, targetErrorMessage, type D1Target } from "./target.ts";
-import { gainsWindowStart, utcDay } from "./to-d1.ts";
+import { gainsWindowStart, isUtcDay, utcDay } from "./to-d1.ts";
 import type { CopyMode } from "./types.ts";
 
 export function requiredEnv(name: string): string {
@@ -42,16 +42,18 @@ export function d1Target(): D1Target {
   return target.value;
 }
 
+/** `--name=YYYY-MM-DD`, a real UTC day; `fallback` when absent (null: required). */
+export function dayOption(name: string, fallback: string | null): string {
+  const value = option(name) ?? fallback;
+  if (value === null || !isUtcDay(value)) {
+    throw new Error(`Pass --${name} as YYYY-MM-DD`);
+  }
+  return value;
+}
+
 /** `--today=YYYY-MM-DD` when given (the day the copy ran), otherwise today in UTC. */
 export function today(): string {
-  const given = option("today");
-  if (given === undefined) {
-    return utcDay(Date.now());
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(given) || Number.isNaN(Date.parse(given))) {
-    throw new Error("Pass --today as YYYY-MM-DD");
-  }
-  return given;
+  return dayOption("today", utcDay(Date.now()));
 }
 
 /** Star events since the start of the gains window, as a PostgREST timestamp. */

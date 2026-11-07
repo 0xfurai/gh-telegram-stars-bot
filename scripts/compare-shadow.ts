@@ -3,16 +3,23 @@
 //   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
 //     bun run shadow:compare -- --env=production --since=YYYY-MM-DD [--until=YYYY-MM-DD]
 //
-// --since  the first whole UTC day of the shadow run.
-// --until  the last day, included (default: yesterday, the last whole day).
+// --since  the first UTC day of the shadow run. star_check_runs keeps 7 days,
+//          so the window must start within the last 6.
+// --until  the last day, included (default: today, so the window ends now).
+//          Run it soon after the window: a subscription notified again later
+//          can no longer be checked, and is counted apart.
 // --env    required: the D1 database to compare (production for the shadow run).
 //
+// Cloudflare's analytics give D1's real rows written per day. The API token is
+// CLOUDFLARE_API_TOKEN when set, otherwise wrangler's login.
+//
 // Prints a Markdown report: stars gained per repository in each app, the
-// subscriptions the Worker never handled, failed runs, and the largest use of
-// the plan limits. Exits 1 when a criterion it can check fails; gain
-// differences are listed for a human to explain. Read-only.
-import { d1Target, option, requiredEnv, runCommand, runMain } from "./migration/cli.ts";
-import { selectAll } from "./migration/io.ts";
+// subscriptions the Worker didn't handle, runs against the schedule, and the
+// largest use of the plan limits. Exits 1 when a criterion it can check
+// fails; gain differences are listed for a human to explain. Read-only.
+import { readFile } from "node:fs/promises";
+import { dayOption, d1Target, requiredEnv, runCommand, runMain } from "./migration/cli.ts";
+import { d1DatabaseId, d1RowsWrittenPerDay, readD1Queries, selectAll } from "./migration/io.ts";
 import {
   compareShadowRun,
   failedCriteria,
@@ -22,47 +29,38 @@ import {
   type ShadowReport,
   type ShadowWindow,
 } from "./migration/shadow.ts";
-import { wranglerTargetArgs, type D1Target } from "./migration/target.ts";
+import type { D1Target } from "./migration/target.ts";
+import { addDays, utcDay } from "./migration/to-d1.ts";
 
 const SHOWN = 30;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function day(name: string, fallback: string | null): string {
-  const value = option(name) ?? fallback;
-  if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
-    throw new Error(`Pass --${name} as YYYY-MM-DD`);
-  }
-  return value;
-}
-
-function nextDay(value: string): string {
-  return new Date(Date.parse(value) + DAY_MS).toISOString().slice(0, 10);
-}
+/** star_check_runs keeps 7 days; older runs are gone. */
+const RUN_HISTORY_DAYS = 6;
 
 function shadowWindow(): ShadowWindow {
-  const yesterday = new Date(Date.now() - DAY_MS).toISOString().slice(0, 10);
-  const window = { since: day("since", null), until: day("until", yesterday) };
-  if (window.until < window.since) {
-    throw new Error("--until is before --since");
+  const now = Date.now();
+  const today = utcDay(now);
+  const since = dayOption("since", null);
+  const until = dayOption("until", today);
+  if (until < since || until > today) {
+    throw new Error("--until must be between --since and today");
   }
-  return window;
+  if (since < addDays(today, -RUN_HISTORY_DAYS)) {
+    throw new Error(`--since must be within the last ${RUN_HISTORY_DAYS} days: older star check runs are deleted`);
+  }
+  const endOfUntil = Date.parse(`${addDays(until, 1)}T00:00:00.000Z`);
+  return { since, until, end: new Date(Math.min(endOfUntil, now)).toISOString() };
 }
 
 async function readD1(target: D1Target, window: ShadowWindow) {
-  const end = `${nextDay(window.until)}T00:00:00.000Z`;
-  const queries = [
+  const [workerGains, workerSubscriptions, runs] = await readD1Queries(runCommand, target, [
     `SELECT repository_id, stars_gained FROM daily_star_gains WHERE day BETWEEN '${window.since}' AND '${window.until}'`,
-    "SELECT cr.chat_id, cr.repository_id, c.is_active, cr.last_notified_at FROM chat_repositories cr JOIN chats c ON c.id = cr.chat_id",
-    `SELECT scheduled_at, ok, summary FROM star_check_runs WHERE scheduled_at >= '${window.since}T00:00:00.000Z' AND scheduled_at < '${end}'`,
-  ];
-  const output = await runCommand("bunx", ["wrangler", "d1", "execute", "DB", ...wranglerTargetArgs(target), "--json", "--command", queries.join("; ")]);
-  const [gains, subscriptions, runs] = (JSON.parse(output) as { results: unknown[] }[]).map((result) => result.results);
-  if (!gains || !subscriptions || !runs) {
-    throw new Error("Reading D1 returned fewer results than queries");
-  }
+    "SELECT cr.chat_id, cr.repository_id, c.is_active, cr.created_at, cr.last_notified_at " +
+      "FROM chat_repositories cr JOIN chats c ON c.id = cr.chat_id",
+    `SELECT scheduled_at, ok, summary FROM star_check_runs WHERE scheduled_at >= '${window.since}T00:00:00.000Z' AND scheduled_at < '${window.end}'`,
+  ]);
   return {
-    workerGains: gains as ShadowInput["workerGains"],
-    workerSubscriptions: subscriptions as ShadowInput["workerSubscriptions"],
+    workerGains: workerGains as ShadowInput["workerGains"],
+    workerSubscriptions: workerSubscriptions as ShadowInput["workerSubscriptions"],
     runs: runs as ShadowInput["runs"],
   };
 }
@@ -72,12 +70,41 @@ async function readSupabase(window: ShadowWindow) {
   const [oldRepositories, oldStarEvents] = await Promise.all([
     selectAll<ShadowInput["oldRepositories"][number]>(supabase, "repositories", { columns: "id,github_id,full_name", order: "id" }),
     selectAll<ShadowInput["oldStarEvents"][number]>(supabase, "star_events", {
-      columns: "repository_id,stars_count,previous_stars_count",
+      columns: "repository_id,stars_count,previous_stars_count,created_at",
       order: "id",
-      filter: `created_at=gte.${window.since}T00:00:00Z&created_at=lt.${nextDay(window.until)}T00:00:00Z`,
+      filter: `created_at=gte.${window.since}T00:00:00Z&created_at=lt.${window.end}`,
     }),
   ]);
   return { oldRepositories, oldStarEvents };
+}
+
+async function cloudflareToken(): Promise<string> {
+  const fromEnv = process.env.CLOUDFLARE_API_TOKEN?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return (JSON.parse(await runCommand("bunx", ["wrangler", "auth", "token", "--json"])) as { token: string }).token;
+}
+
+async function accountId(): Promise<string> {
+  const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  const match = /"account_id":\s*"([0-9a-f]{32})"/.exec(config);
+  if (!match?.[1]) {
+    throw new Error("No account_id in wrangler.jsonc");
+  }
+  return match[1];
+}
+
+async function readRowsWritten(target: D1Target, window: ShadowWindow) {
+  const token = await cloudflareToken();
+  const databaseId = await d1DatabaseId(runCommand, target);
+  const rowsWrittenPerDay = await d1RowsWrittenPerDay({ token, accountId: await accountId() }, databaseId, window);
+  return { rowsWrittenPerDay };
+}
+
+/** Up to SHOWN lines, then how many were left out. */
+function shown(lines: readonly string[]): string[] {
+  return [...lines.slice(0, SHOWN), ...(lines.length > SHOWN ? [`… and ${lines.length - SHOWN} more`] : [])];
 }
 
 function gainLines(report: ShadowReport): string[] {
@@ -89,38 +116,46 @@ function gainLines(report: ShadowReport): string[] {
     `${report.gains.length} repositories gained stars: ${total("oldApp")} in the old app, ${total("worker")} in the Worker. ` +
       `${differing.length} differ.`,
     ...(differing.length > 0 ? ["", "| Repository | Old app | Worker | Difference |", "| -- | -- | -- | -- |"] : []),
-    ...differing.slice(0, SHOWN).map((g) => `| ${g.fullName} | ${g.oldApp} | ${g.worker} | ${g.difference > 0 ? "+" : ""}${g.difference} |`),
-    ...(differing.length > SHOWN ? [`\n… and ${differing.length - SHOWN} more`] : []),
+    ...shown(differing.map((g) => `| ${g.fullName} | ${g.oldApp} | ${g.worker} | ${g.difference > 0 ? "+" : ""}${g.difference} |`)),
   ];
 }
 
-function report(window: ShadowWindow, result: ShadowReport): string {
-  const { runs } = result;
+function notificationLines(report: ShadowReport): string[] {
   return [
-    `# Shadow run ${window.since} to ${window.until}`,
-    "",
-    ...gainLines(result),
-    "",
     "## Notifications",
     "",
-    `${result.missedNotifications.length} subscriptions to repositories that gained stars were never handled by the Worker` +
-      ` (${result.inactiveChats} more belong to inactive chats, which the Worker skips on purpose).`,
-    ...result.missedNotifications.slice(0, SHOWN).map((m) => `* chat ${m.chatId}, repository #${m.githubId}`),
-    "",
+    `${report.missedNotifications.length} subscriptions weren't handled by the Worker after the old app's last gain for their repository.`,
+    `Not counted: ${report.inactiveChats} in inactive chats (skipped on purpose), ` +
+      `${report.notifiedAfterWindow} handled again after the window (can't be checked).`,
+    ...shown(report.missedNotifications.map((m) => `* chat ${m.chatId}, repository #${m.githubId}`)),
+  ];
+}
+
+function limitLines(report: ShadowReport): string[] {
+  const { runs } = report;
+  const failed = runs.failed.length > 0 ? `: ${shown(runs.failed).join(", ")}` : "";
+  return [
     "## Runs and limits",
     "",
-    `* ${runs.total} runs, ${runs.failed.length} failed${runs.failed.length > 0 ? `: ${runs.failed.slice(0, SHOWN).join(", ")}` : ""}`,
+    `* ${runs.total} runs of ${runs.expected} scheduled, ${runs.failed.length} failed${failed}`,
     `* Most subrequests in a run: ${runs.maxSubrequests} (limit ${PLAN_LIMITS.subrequestsPerRun}, pass under ${PLAN_LIMITS.subrequestsPerRun * LIMIT_SHARE})`,
-    `* Most rows written by star checks in a day: ${runs.maxRowsWrittenPerDay} (limit ${PLAN_LIMITS.rowsWrittenPerDay}, pass under ${PLAN_LIMITS.rowsWrittenPerDay * LIMIT_SHARE})`,
-  ].join("\n");
+    `* Most D1 rows written in a day: ${report.maxRowsWrittenPerDay} (limit ${PLAN_LIMITS.rowsWrittenPerDay}, pass under ${PLAN_LIMITS.rowsWrittenPerDay * LIMIT_SHARE})`,
+  ];
 }
 
 async function main(): Promise<void> {
   const target = d1Target();
   const window = shadowWindow();
-  const [d1, supabase] = await Promise.all([readD1(target, window), readSupabase(window)]);
-  const result = compareShadowRun({ window, ...supabase, ...d1 });
-  console.log(report(window, result));
+  // One after the other: wrangler calls fail when they overlap.
+  const d1 = await readD1(target, window);
+  const rows = await readRowsWritten(target, window);
+  const supabase = await readSupabase(window);
+  const result = compareShadowRun({ window, ...supabase, ...d1, ...rows });
+  console.log(
+    [`# Shadow run ${window.since} to ${window.until}`, "", ...gainLines(result), "", ...notificationLines(result), "", ...limitLines(result)].join(
+      "\n",
+    ),
+  );
   const failed = failedCriteria(result);
   if (failed.length > 0) {
     console.error(`\nFailed: ${failed.join("; ")}`);

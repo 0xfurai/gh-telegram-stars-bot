@@ -20,7 +20,7 @@ export type CopyProblem =
   | { kind: "missing-node-id"; githubId: number; fullName: string };
 
 const RETENTION_DAYS = 90;
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 const ROWS_PER_INSERT = 100;
 
 function sqlString(value: string | null): string {
@@ -44,6 +44,16 @@ function insertRows(prefix: string, rows: readonly string[], suffix = ""): strin
 
 export function utcDay(value: string | number): string {
   return new Date(value).toISOString().slice(0, 10);
+}
+
+/** A real YYYY-MM-DD day: "2026-02-31" is refused, not rolled over to March. */
+export function isUtcDay(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && utcDay(value) === value;
+}
+
+/** The UTC day `days` after `day` (before it when negative). */
+export function addDays(day: string, days: number): string {
+  return utcDay(Date.parse(day) + days * DAY_MS);
 }
 
 /** The first day of the 90-day gains window that ends on `today` (a UTC day). */

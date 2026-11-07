@@ -259,10 +259,23 @@ describe("/list, /remove and /stats", () => {
     expect(await replyTo("/remove nope")).toBe(messages.invalidRepository("not-a-repository"));
   });
 
-  it("shows stats", async () => {
-    expect(await replyTo("/stats")).toBe(
+  it("shows stats in the admin chat", async () => {
+    expect(await replyTo("/stats", { settings: { ADMIN_CHAT_ID: "1" } })).toBe(
       messages.stats({ repositories: 2, activeChats: 1, subscriptions: 2, starsGained: 0 }, 90),
     );
+  });
+
+  it("answers /stats like an unknown command anywhere else, or with no admin chat", async () => {
+    expect(await replyTo("/stats", { settings: { ADMIN_CHAT_ID: "42" } })).toBe(messages.unknownCommand());
+    expect(await replyTo("/stats")).toBe(messages.unknownCommand());
+    expect(await replyTo("/stats", { chatId: -100, chatType: "group", settings: { ADMIN_CHAT_ID: "42" } })).toBe(
+      messages.unknownCommand(),
+    );
+  });
+
+  it("leaves /stats out of /help and the welcome message", async () => {
+    expect(await replyTo("/help")).not.toContain("/stats");
+    expect(await replyTo("/start")).not.toContain("/stats");
   });
 });
 

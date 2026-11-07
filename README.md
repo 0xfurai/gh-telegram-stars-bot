@@ -84,6 +84,8 @@ Use the same token and secret as the Worker's secrets. The script:
 2. Refuses to continue unless the Worker's `/health` answers 200. A 503 means a setting is missing or invalid: store it and run the script again.
 3. Sets the webhook, keeping pending updates so messages sent during a switch reach the Worker, and registers the command menu.
 
+`/stats` (totals for the whole bot) only answers in `ADMIN_CHAT_ID`; anywhere else it's an unknown command. Pass the same `ADMIN_CHAT_ID` to `telegram:setup` to list it in that chat's menu only.
+
 Every webhook request gets 200 once the secret checks out, so Telegram never redelivers an update:
 
 * A handler that throws (a bug, a D1 outage) is logged as `"Update failed"` with the update ID, and the user gets "Something went wrong" instead of silence, unless the handler had already replied. Membership updates get no reply.

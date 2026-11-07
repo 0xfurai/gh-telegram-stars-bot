@@ -1,7 +1,10 @@
 // Points a Telegram bot at a deployed Worker and registers its command menu.
 //
 //   TELEGRAM_BOT_TOKEN=... WEBHOOK_SECRET=... WORKER_URL=https://<worker-host> \
-//     bun run telegram:setup
+//     [ADMIN_CHAT_ID=...] bun run telegram:setup
+//
+// With ADMIN_CHAT_ID (the Worker's), that chat's menu also lists the admin
+// commands (/stats); everyone else's menu doesn't.
 //
 // Use the same TELEGRAM_BOT_TOKEN and WEBHOOK_SECRET as the Worker's secrets.
 //
@@ -15,7 +18,7 @@
 //      switching reach the Worker), then setMyCommands.
 //
 // Runs on Node 24 (type stripping); never prints the token.
-import { COMMANDS } from "../src/command-list.ts";
+import { ADMIN_COMMANDS, COMMANDS, PUBLIC_COMMANDS } from "../src/command-list.ts";
 
 interface ApiResponse {
   ok: boolean;
@@ -83,7 +86,11 @@ async function main(): Promise<void> {
     allowed_updates: ["message", "my_chat_member"],
     drop_pending_updates: false,
   });
-  await callApi(token, "setMyCommands", { commands: COMMANDS });
+  await callApi(token, "setMyCommands", { commands: PUBLIC_COMMANDS });
+  const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+  if (adminChatId) {
+    await callApi(token, "setMyCommands", { commands: COMMANDS, scope: { type: "chat", chat_id: Number(adminChatId) } });
+  }
 
   const info = (await callApi(token, "getWebhookInfo")) as {
     url: string;
@@ -93,7 +100,12 @@ async function main(): Promise<void> {
   console.log(`Webhook:          ${info.url}`);
   console.log(`Pending updates:  ${info.pending_update_count}`);
   console.log(`Last error:       ${info.last_error_message ?? "none"}`);
-  console.log(`Commands:         ${COMMANDS.map((c) => `/${c.command}`).join(" ")}`);
+  console.log(`Commands:         ${PUBLIC_COMMANDS.map((c) => `/${c.command}`).join(" ")}`);
+  console.log(
+    adminChatId
+      ? `Admin chat also:  ${ADMIN_COMMANDS.map((c) => `/${c.command}`).join(" ")}`
+      : "Admin commands:   not in any menu (set ADMIN_CHAT_ID to list them in the admin chat)",
+  );
 }
 
 main().catch((error: unknown) => {

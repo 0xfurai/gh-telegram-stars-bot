@@ -5,7 +5,7 @@
 // "*" in a repository name made Telegram reject the message, and those
 // notifications were never delivered.
 import { chunk } from "./chunk";
-import { COMMANDS } from "./command-list";
+import { PUBLIC_COMMANDS } from "./command-list";
 import { repositoryUrl, type Repository, type Stats } from "./db";
 import type { RepositoryInputError } from "./repo-input";
 import { assertNever } from "./result";
@@ -30,7 +30,7 @@ function count(n: number, singular: string, plural = `${singular}s`): string {
   return `${number(n)} ${n === 1 ? singular : plural}`;
 }
 
-const COMMAND_LINES = COMMANDS.map(({ command, description }) => `/${command} - ${html(description)}`).join("\n");
+const COMMAND_LINES = PUBLIC_COMMANDS.map(({ command, description }) => `/${command} - ${html(description)}`).join("\n");
 
 const EXAMPLES = [
   "<b>Examples:</b>",

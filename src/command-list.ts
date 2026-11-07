@@ -1,12 +1,22 @@
 // The bot's commands, as shown in Telegram's command menu. No imports, so the
 // setup script (scripts/telegram-setup.ts) can load it with plain Node.
-export const COMMANDS = [
+
+/** Everyone's commands: the default menu, /start and /help. */
+export const PUBLIC_COMMANDS = [
   { command: "start", description: "Start the bot and show the welcome message" },
   { command: "help", description: "Show help and available commands" },
   { command: "add", description: "Subscribe to a repository, e.g. /add microsoft/vscode" },
   { command: "list", description: "Show your repository subscriptions" },
   { command: "remove", description: "Unsubscribe from a repository" },
-  { command: "stats", description: "Show bot statistics" },
 ] as const;
+
+/**
+ * Only for ADMIN_CHAT_ID: elsewhere they answer like an unknown command, and
+ * they're in the admin chat's menu only. /stats shows totals for the whole
+ * bot (chats, subscriptions), which aren't everyone's business.
+ */
+export const ADMIN_COMMANDS = [{ command: "stats", description: "Show bot statistics (admin only)" }] as const;
+
+export const COMMANDS = [...PUBLIC_COMMANDS, ...ADMIN_COMMANDS] as const;
 
 export type CommandName = (typeof COMMANDS)[number]["command"];

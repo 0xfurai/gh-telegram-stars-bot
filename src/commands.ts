@@ -150,7 +150,12 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
       }
     },
     remove,
+    // Admin only (see ADMIN_COMMANDS); elsewhere it's an unknown command, so
+    // nothing hints that it exists.
     stats: async (ctx) => {
+      if (chatIdOf(ctx) !== deps.config.adminChatId) {
+        return replyHtml(ctx, messages.unknownCommand());
+      }
       const since = utcDay(new Date(now().getTime() - (STATS_DAYS - 1) * DAY_MS));
       return replyHtml(ctx, messages.stats(await getStats(deps.db, since), STATS_DAYS));
     },

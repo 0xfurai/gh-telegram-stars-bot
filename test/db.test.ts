@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ensureChat,
   getStats,
@@ -7,7 +7,11 @@ import {
   listRepositoriesToCheck,
   listSubscribers,
   listSubscriptions,
-  markNotified,
+  acquireStarCheckLock,
+  loadStarCheck,
+  markNotifiedMany,
+  releaseStarCheckLock,
+  setStarCheckCursor,
   pruneStarGains,
   recordStarCheck,
   repositoryUrl,
@@ -302,11 +306,33 @@ describe("star check", () => {
     expect(firstPicks.size).toBeGreaterThan(1);
   });
 
-  it("markNotified raises last_notified_stars but never lowers it", async () => {
-    await markNotified(db, 1, 10, 105);
-    await markNotified(db, 1, 10, 103);
+  it("markNotifiedMany raises last_notified_stars but never lowers it", async () => {
+    await markNotifiedMany(db, [
+      { chatId: 1, repositoryId: 10, starsCount: 105 },
+      { chatId: 1, repositoryId: 20, starsCount: 51 },
+    ]);
+    await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 103 }]);
+    await markNotifiedMany(db, []);
 
     expect(await lastNotified(1, 10)).toBe(105);
+    expect(await lastNotified(1, 20)).toBe(51);
+  });
+
+  it("loads the repositories to check and the cursor together", async () => {
+    await setStarCheckCursor(db, 15);
+
+    const loaded = await loadStarCheck(db);
+
+    expect(loaded.cursor).toBe(15);
+    expect(loaded.repositories.map((r) => r.id)).toEqual([10, 20]);
+    await setStarCheckCursor(db, 0);
+  });
+
+  it("saves the cursor in the same batch as the star check", async () => {
+    await recordStarCheck(db, [update(10, 105)], DAY, 10);
+
+    expect((await loadStarCheck(db)).cursor).toBe(10);
+    await setStarCheckCursor(db, 0);
   });
 
   it("prunes gains older than a day", async () => {
@@ -321,6 +347,29 @@ describe("star check", () => {
   it("formats UTC days", () => {
     expect(utcDay(new Date("2026-11-07T23:59:59.999Z"))).toBe("2026-11-07");
     expect(utcDay(new Date("2026-11-08T00:00:00.000Z"))).toBe("2026-11-08");
+  });
+});
+
+describe("run lock", () => {
+  afterEach(async () => {
+    await releaseStarCheckLock(db);
+  });
+
+  it("is taken by one run at a time, and can be taken again after release", async () => {
+    const now = Date.UTC(2026, 10, 7, 12, 0);
+
+    expect(await acquireStarCheckLock(db, now, now + 600_000)).toBe(true);
+    expect(await acquireStarCheckLock(db, now + 1000, now + 601_000)).toBe(false);
+
+    await releaseStarCheckLock(db);
+    expect(await acquireStarCheckLock(db, now + 2000, now + 602_000)).toBe(true);
+  });
+
+  it("expires, so a crashed run can't block later ones forever", async () => {
+    const now = Date.UTC(2026, 10, 7, 12, 0);
+    await acquireStarCheckLock(db, now, now + 600_000);
+
+    expect(await acquireStarCheckLock(db, now + 600_001, now + 1_200_000)).toBe(true);
   });
 });
 

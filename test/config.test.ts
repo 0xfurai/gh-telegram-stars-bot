@@ -200,11 +200,11 @@ describe("Worker with invalid settings", () => {
     expect(await response.json()).toEqual({ error: "Service misconfigured" });
   });
 
-  it("fails the scheduled run instead of skipping it", () => {
+  it("fails the scheduled run instead of skipping it", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const controller = { cron: "*/5 * * * *", scheduledTime: Date.now(), noRetry: () => undefined };
 
-    expect(() => worker.scheduled(controller, badEnv)).toThrow(
+    await expect(worker.scheduled(controller, badEnv)).rejects.toThrow(
       "Invalid Worker settings: WEBHOOK_SECRET is required",
     );
   });

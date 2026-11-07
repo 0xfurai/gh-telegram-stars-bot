@@ -91,6 +91,39 @@ Every webhook request gets 200 once the secret checks out, so Telegram never red
 * A body that isn't JSON is logged as `"Webhook request failed"`.
 * An update that takes over 20 seconds gets its 200 early.
 
+## Star check
+
+A Cron Trigger runs `src/star-check.ts` every 5 minutes:
+
+1. Checks subscribed repositories on GitHub, 100 per GraphQL request, continuing from where the last run stopped.
+2. Saves what changed (stars, names, descriptions) and today's gains.
+3. Sends due notifications: one message per chat, listing every repository that gained stars since that chat was last told. A chat is only marked notified after Telegram accepts the message, so a failed send is retried next run.
+
+`NOTIFICATIONS` controls step 3:
+
+| Mode | What happens |
+|---|---|
+| `on` | Sends. With `ALLOWED_CHAT_IDS` set, only to those chats. |
+| `dry-run` | Logs each notification (`"Notification skipped"`) and marks it sent. Used for the shadow run. |
+| `off` | Sends and marks nothing; everything stays due. The emergency stop: `wrangler secret put NOTIFICATIONS`, no deploy. |
+
+Limits and safety:
+
+* **Subrequest budget.** Each run stays within 45 subrequests (the free plan allows about 50; fetch calls and D1 queries both count).
+  * GitHub gets up to 10 requests (1,000 repositories).
+  * Messages get what's left, at most 20, at 2 subrequests each: the send, then one D1 batch marking it sent.
+  * Everything else waits for the next run. The summary's `subrequests` field shows what a run used.
+* **Run lock.** Two runs never overlap. A run that finds the lock held skips. A crashed run's lock expires after 10 minutes.
+* **Telegram failures.**
+  * A rate limit or outage stops sending for that run.
+  * A message Telegram rejects (likely a bug on our side) is logged and dropped.
+  * If marking a sent message fails, sending stops, and the possible duplicate is logged.
+* **Retention.** The first run after midnight UTC deletes star gains older than 90 days.
+
+Every run logs a `"Star check finished"` summary.
+
+Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

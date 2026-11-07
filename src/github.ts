@@ -4,6 +4,7 @@
 // 200 repositories cost 2 requests (and 2 rate-limit points). Expected
 // failures are Results with a tagged error; callers switch over `kind`.
 import * as z from "zod/mini";
+import { chunk } from "./chunk";
 import type { RepositoryInfo, RepositoryToCheck, StarCheckUpdate } from "./db";
 import { assertNever, err, ok, type Result } from "./result";
 
@@ -304,14 +305,6 @@ export function rotate(repositories: readonly RepositoryToCheck[], cursor: numbe
   const sorted = [...repositories].sort((a, b) => a.id - b.id);
   const start = sorted.findIndex((repo) => repo.id > cursor);
   return start <= 0 ? sorted : [...sorted.slice(start), ...sorted.slice(0, start)];
-}
-
-function chunk<T>(items: readonly T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
 }
 
 /**

@@ -180,34 +180,41 @@ export async function upsertRepository(db: D1Database, repo: RepositoryInfo, day
  * still gain stars), and so are ones GitHub stopped returning: if they come
  * back, they're picked up again.
  */
-export async function listRepositoriesToCheck(db: D1Database): Promise<RepositoryToCheck[]> {
-  const { results } = await db
-    .prepare(
-      `SELECT id, github_node_id, full_name, description, stars_count, is_archived FROM repositories r
-       WHERE github_node_id IS NOT NULL
-         AND EXISTS (
-           SELECT 1 FROM chat_repositories cr JOIN chats c ON c.id = cr.chat_id
-           WHERE cr.repository_id = r.id AND c.is_active = 1
-         )
-       ORDER BY id`,
-    )
-    .all<{
-      id: number;
-      github_node_id: string;
-      full_name: string;
-      description: string | null;
-      stars_count: number;
-      is_archived: number;
-    }>();
+interface RepositoryToCheckRow {
+  id: number;
+  github_node_id: string;
+  full_name: string;
+  description: string | null;
+  stars_count: number;
+  is_archived: number;
+}
 
-  return results.map((row) => ({
+function repositoriesToCheckStatement(db: D1Database): D1PreparedStatement {
+  return db.prepare(
+    `SELECT id, github_node_id, full_name, description, stars_count, is_archived FROM repositories r
+     WHERE github_node_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM chat_repositories cr JOIN chats c ON c.id = cr.chat_id
+         WHERE cr.repository_id = r.id AND c.is_active = 1
+       )
+     ORDER BY id`,
+  );
+}
+
+function toRepositoryToCheck(row: RepositoryToCheckRow): RepositoryToCheck {
+  return {
     id: row.id,
     nodeId: row.github_node_id,
     fullName: row.full_name,
     description: row.description,
     starsCount: row.stars_count,
     isArchived: row.is_archived === 1,
-  }));
+  };
+}
+
+export async function listRepositoriesToCheck(db: D1Database): Promise<RepositoryToCheck[]> {
+  const { results } = await repositoriesToCheckStatement(db).all<RepositoryToCheckRow>();
+  return results.map(toRepositoryToCheck);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +338,9 @@ export async function recordStarCheck(
   db: D1Database,
   updates: readonly StarCheckUpdate[],
   day: string,
+  nextCursor?: number,
 ): Promise<{ rowsWritten: number }> {
+  const cursor = nextCursor === undefined ? [] : [setCursorStatement(db, nextCursor)];
   const statements = updates.flatMap((update) => [
     recordGainStatement(db, update.id, update.starsCount, day),
     db
@@ -342,10 +351,10 @@ export async function recordStarCheck(
       )
       .bind(update.id, update.starsCount, update.fullName, update.description, update.isArchived ? 1 : 0),
   ]);
-  if (statements.length === 0) {
+  if (statements.length + cursor.length === 0) {
     return { rowsWritten: 0 };
   }
-  const results = await db.batch(statements);
+  const results = await db.batch([...statements, ...cursor]);
   return { rowsWritten: results.reduce((sum, result) => sum + result.meta.rows_written, 0) };
 }
 
@@ -384,22 +393,27 @@ export async function listDueNotifications(db: D1Database, limit: number): Promi
 }
 
 /**
- * Records that a chat was told about `starsCount`. Never lowers the value, so
- * an overlapping run can't resend. One written row.
+ * Records that chats were told about `starsCount`, in one batch (one D1 call),
+ * for a message that covered all of them. Never lowers the value. Overlapping
+ * runs are prevented by the run lock, not by this.
  */
-export async function markNotified(
+export async function markNotifiedMany(
   db: D1Database,
-  chatId: number,
-  repositoryId: number,
-  starsCount: number,
+  items: readonly { chatId: number; repositoryId: number; starsCount: number }[],
 ): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE chat_repositories SET last_notified_stars = ?3
-       WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars < ?3`,
-    )
-    .bind(chatId, repositoryId, starsCount)
-    .run();
+  if (items.length === 0) {
+    return;
+  }
+  await db.batch(
+    items.map((item) =>
+      db
+        .prepare(
+          `UPDATE chat_repositories SET last_notified_stars = ?3
+           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars < ?3`,
+        )
+        .bind(item.chatId, item.repositoryId, item.starsCount),
+    ),
+  );
 }
 
 /** Deletes star gains older than `beforeDay` (YYYY-MM-DD). Returns rows deleted. */
@@ -441,10 +455,41 @@ export async function getStarCheckCursor(db: D1Database): Promise<number> {
   return cursor ?? 0;
 }
 
+function setCursorStatement(db: D1Database, cursor: number): D1PreparedStatement {
+  return db.prepare("UPDATE star_check_state SET cursor = ?1 WHERE id = 1 AND cursor <> ?1").bind(cursor);
+}
+
 /** Saves the cursor. No written rows when it's unchanged. */
 export async function setStarCheckCursor(db: D1Database, cursor: number): Promise<void> {
-  await db
-    .prepare("UPDATE star_check_state SET cursor = ?1 WHERE id = 1 AND cursor <> ?1")
-    .bind(cursor)
+  await setCursorStatement(db, cursor).run();
+}
+
+/** The repositories to check and the cursor, in one D1 call. */
+export async function loadStarCheck(db: D1Database): Promise<{ repositories: RepositoryToCheck[]; cursor: number }> {
+  const [repositories, state] = await db.batch([
+    repositoriesToCheckStatement(db),
+    db.prepare("SELECT cursor FROM star_check_state WHERE id = 1"),
+  ]);
+  const rows = (repositories?.results ?? []) as RepositoryToCheckRow[];
+  const cursorRow = state?.results[0] as { cursor: number } | undefined;
+  return { repositories: rows.map(toRepositoryToCheck), cursor: cursorRow?.cursor ?? 0 };
+}
+
+/**
+ * Takes the run lock until `until`, if it's free or expired. False when
+ * another run holds it. One written row.
+ */
+export async function acquireStarCheckLock(db: D1Database, now: number, until: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE star_check_state SET locked_until = ?2
+       WHERE id = 1 AND (locked_until IS NULL OR locked_until < ?1)`,
+    )
+    .bind(new Date(now).toISOString(), new Date(until).toISOString())
     .run();
+  return result.meta.changes === 1;
+}
+
+export async function releaseStarCheckLock(db: D1Database): Promise<void> {
+  await db.prepare("UPDATE star_check_state SET locked_until = NULL WHERE id = 1").run();
 }

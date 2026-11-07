@@ -1,0 +1,67 @@
+name: Deploy
+
+# Called by ci.yml (staging, on every push to main) and deploy-production.yml
+# (production, by hand with approval). Deploys the commit that was checked
+# out, so every deployed version is a known commit.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: staging or production (a GitHub environment, and the wrangler environment)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: nexus-runner
+    timeout-minutes: 15
+    # The environment holds the Cloudflare token (secret CLOUDFLARE_API_TOKEN)
+    # and the chat IDs (variables ALLOWED_CHAT_IDS, ADMIN_CHAT_ID). Only jobs
+    # that name it get them, and its branch rule allows main only.
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TARGET: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - run: bun install --frozen-lockfile
+
+      # Migrations only add to the schema, so they go first: the running
+      # version keeps working, and the new one finds its tables.
+      - name: Apply D1 migrations
+        run: |
+          case "$TARGET" in
+            production) bunx wrangler d1 migrations apply DB --remote ;;
+            staging) bunx wrangler d1 migrations apply DB --remote --env staging ;;
+            *) echo "Unknown environment: $TARGET" >&2; exit 1 ;;
+          esac
+
+      - name: Deploy the Worker
+        env:
+          ALLOWED_CHAT_IDS: ${{ vars.ALLOWED_CHAT_IDS }}
+          ADMIN_CHAT_ID: ${{ vars.ADMIN_CHAT_ID }}
+        run: |
+          case "$TARGET" in
+            production) env_args=() ;;
+            staging) env_args=(--env staging) ;;
+            *) echo "Unknown environment: $TARGET" >&2; exit 1 ;;
+          esac
+          bunx wrangler deploy "${env_args[@]}" \
+            --var "ALLOWED_CHAT_IDS:${ALLOWED_CHAT_IDS}" \
+            --var "ADMIN_CHAT_ID:${ADMIN_CHAT_ID}" \
+            --message "Commit ${GITHUB_SHA}"

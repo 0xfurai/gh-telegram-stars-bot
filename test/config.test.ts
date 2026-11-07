@@ -29,6 +29,7 @@ describe("parseConfig", () => {
         maxReposPerChat: 50,
         allowedChatIds: null,
         adminChatId: null,
+        environment: "production",
       },
     });
   });
@@ -66,6 +67,21 @@ describe("parseConfig", () => {
     const result = parse({ ALLOWED_CHAT_IDS: " 42, -1001234567890 ,," });
 
     expect(result.ok && [...(result.value.allowedChatIds ?? [])]).toEqual([42, -1001234567890]);
+  });
+
+  it("requires ALLOWED_CHAT_IDS in staging, so the test bot can't message real users", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "staging" }))).toEqual(["ALLOWED_CHAT_IDS is required in staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: " " }))).toEqual([
+      "ALLOWED_CHAT_IDS is required in staging",
+    ]);
+    expect(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42" })).toMatchObject({
+      ok: true,
+      value: { environment: "staging", allowedChatIds: new Set([42]) },
+    });
+  });
+
+  it("rejects an unknown ENVIRONMENT", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "prod" }))).toEqual(["ENVIRONMENT must be production or staging"]);
   });
 
   it("treats an empty ALLOWED_CHAT_IDS as no restriction", () => {

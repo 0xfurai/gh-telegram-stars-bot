@@ -20,3 +20,4 @@ BOT_INFO=<getMe-result-json>
 # Optional overrides of the defaults in wrangler.jsonc:
 # ALLOWED_CHAT_IDS=<comma-separated-chat-ids>
 # ADMIN_CHAT_ID=<chat-id-for-failed-run-alerts>
+# ENVIRONMENT=<production or staging; staging requires ALLOWED_CHAT_IDS>

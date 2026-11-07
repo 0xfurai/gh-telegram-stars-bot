@@ -179,6 +179,31 @@ The copy back sends each repository's lowest count that any subscriber was last 
 
 Repositories that are gone from GitHub, or private, are stored without a node ID and archived. GitHub IDs and Telegram chat IDs are the keys, so running a copy again updates rather than duplicates.
 
+## Environments and deploys
+
+| | Staging | Production |
+|---|---|---|
+| Worker | `gh-telegram-stars-bot-staging` | `gh-telegram-stars-bot` |
+| D1 | `gh-telegram-stars-bot-staging` | `gh-telegram-stars-bot` |
+| Bot | a test bot, never the production one | the production bot |
+| Deployed | on every push to `main`, after the checks pass | by hand: Actions → **Deploy to production** → Run workflow on `main`, then approve |
+
+Both run `.github/workflows/deploy.yml`: apply D1 migrations, then `wrangler deploy` with the commit SHA as the version message. Nobody deploys from a laptop.
+
+* **Settings.** Secrets are set per environment: `bunx wrangler secret put <NAME> --env staging` (leave out `--env` for production).
+* **Chat IDs.** They are personal data, and this repo is public, so `ALLOWED_CHAT_IDS` and `ADMIN_CHAT_ID` aren't in `wrangler.jsonc`. They are variables of the GitHub environments (Settings → Environments), passed to `wrangler deploy --var`.
+* **Staging only messages allowed chats.** It holds a copy of production data during the rehearsal. With `ENVIRONMENT=staging` and no `ALLOWED_CHAT_IDS`, the settings are invalid and the Worker answers 503.
+* **GitHub environments.** Each holds the `CLOUDFLARE_API_TOKEN` secret and accepts deploys from `main` only. `production` also requires an approval.
+
+### Undoing a bad deploy
+
+```sh
+bunx wrangler deployments list                       # recent versions, with their commit
+bunx wrangler rollback [<version-id>] -m "why"       # production; add --env staging for staging
+```
+
+A rollback restores the previous code in seconds. It doesn't touch D1 or secrets, so roll back the code first, then fix data separately. Migrations only add to the schema, so older code keeps working after one.
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

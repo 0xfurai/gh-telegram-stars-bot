@@ -9,6 +9,9 @@ import { err, ok, type Result } from "./result";
 export const NOTIFICATION_MODES = ["on", "dry-run", "off"] as const;
 export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
 
+export const ENVIRONMENTS = ["production", "staging"] as const;
+export type Environment = (typeof ENVIRONMENTS)[number];
+
 const TELEGRAM_TOKEN = /^(\d+):[A-Za-z0-9_-]{30,}$/;
 // Telegram allows 1-256 characters for secret_token; require a strong one.
 const WEBHOOK_SECRET = /^[A-Za-z0-9_-]{32,256}$/;
@@ -99,6 +102,7 @@ const settingsShape = {
   MAX_REPOS_PER_CHAT: z.pipe(z.optional(z.string()), z.transform(parseMaxRepos)),
   ALLOWED_CHAT_IDS: z.pipe(z.optional(z.string()), z.transform(parseChatIdList)),
   ADMIN_CHAT_ID: z.pipe(z.optional(z.string()), z.transform(parseOptionalChatId)),
+  ENVIRONMENT: z._default(z.enum(ENVIRONMENTS, { error: "must be production or staging" }), "production"),
 };
 
 type Settings = z.output<z.ZodMiniObject<typeof settingsShape>>;
@@ -109,6 +113,14 @@ function checkBotMatchesToken(settings: Settings, ctx: z.core.$RefinementCtx<Set
   const tokenBotId = TELEGRAM_TOKEN.exec(settings.TELEGRAM_BOT_TOKEN)?.[1];
   if (tokenBotId !== String(settings.BOT_INFO.id)) {
     ctx.addIssue({ code: "custom", path: ["BOT_INFO"], message: "is for a different bot than TELEGRAM_BOT_TOKEN" });
+  }
+}
+
+// Staging holds a copy of production data during the rehearsal: its bot must
+// never message anyone outside the allowlist, so an empty one is an error.
+function checkStagingIsRestricted(settings: Settings, ctx: z.core.$RefinementCtx<Settings>): void {
+  if (settings.ENVIRONMENT === "staging" && settings.ALLOWED_CHAT_IDS === null) {
+    ctx.addIssue({ code: "custom", path: ["ALLOWED_CHAT_IDS"], message: "is required in staging" });
   }
 }
 
@@ -125,11 +137,12 @@ function toAppConfig(settings: Settings) {
     allowedChatIds: settings.ALLOWED_CHAT_IDS,
     /** Where failed-run alerts go. null turns the alerts off. */
     adminChatId: settings.ADMIN_CHAT_ID,
+    environment: settings.ENVIRONMENT,
   };
 }
 
 const configSchema = z.pipe(
-  z.object(settingsShape).check(z.superRefine(checkBotMatchesToken)),
+  z.object(settingsShape).check(z.superRefine(checkBotMatchesToken), z.superRefine(checkStagingIsRestricted)),
   z.transform(toAppConfig),
 );
 

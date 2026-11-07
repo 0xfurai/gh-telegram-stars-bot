@@ -19,6 +19,6 @@ export default {
       // Fail the run visibly instead of skipping it quietly.
       throw new Error(`Invalid Worker settings: ${settings.errors.join("; ")}`);
     }
-    handleScheduled(controller);
+    handleScheduled(controller, settings.config);
   },
 } satisfies ExportedHandler<Env>;

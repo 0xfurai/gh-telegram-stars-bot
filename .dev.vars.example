@@ -1,21 +1,22 @@
-# Copy to .dev.vars for local `wrangler dev`. Never commit .dev.vars.
-# Every value is validated at startup (src/config.ts). With invalid values the
-# Worker answers 503 and logs which settings are wrong.
+# Copy to .dev.vars for local `wrangler dev`, then replace every <...> value.
+# Never commit .dev.vars.
+#
+# Every value is validated at startup (src/config.ts). Until the placeholders
+# are replaced, the Worker answers 503 and logs which settings are wrong.
 
-# Secrets. Use a test bot from BotFather for local work, never the production bot.
-TELEGRAM_BOT_TOKEN=123456789:replace-with-your-test-bot-token-xxxxxxxxxx
-GITHUB_TOKEN=replace-with-a-github-token
+# Use a test bot from BotFather for local work, never the production bot.
+TELEGRAM_BOT_TOKEN=<test-bot-token-from-botfather>
+GITHUB_TOKEN=<github-token>
 # 32-256 characters of A-Z, a-z, 0-9, _ or -. Generate one: openssl rand -hex 32
-WEBHOOK_SECRET=replace-with-output-of-openssl-rand-hex-32-0000000000
+WEBHOOK_SECRET=<output-of-openssl-rand-hex-32>
 
 # on, dry-run or off. Locally, dry-run logs notifications without sending them.
 NOTIFICATIONS=dry-run
 
-# The bot's getMe result as JSON:
+# The test bot's getMe result as JSON. Its id must match the token's prefix:
 #   curl -s https://api.telegram.org/bot<TOKEN>/getMe | jq -c .result
-BOT_INFO={"id":123456789,"is_bot":true,"first_name":"Test bot","username":"my_test_bot"}
+BOT_INFO=<getMe-result-json>
 
-# Optional. Comma-separated chat IDs that may use the bot; empty means everyone.
-ALLOWED_CHAT_IDS=
-# Optional. Chat that receives failed-run alerts; empty turns alerts off.
-ADMIN_CHAT_ID=
+# Optional overrides of the defaults in wrangler.jsonc:
+# ALLOWED_CHAT_IDS=<comma-separated-chat-ids>
+# ADMIN_CHAT_ID=<chat-id-for-failed-run-alerts>

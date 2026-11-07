@@ -66,6 +66,7 @@ describe("scheduled", () => {
       message: "Star check placeholder ran",
       cron: "*/5 * * * *",
       scheduledTime: "2026-11-06T12:00:00.000Z",
+      notifications: "dry-run",
     });
   });
 });

@@ -12,6 +12,7 @@ import {
   type StarCheckLimits,
 } from "../src/star-check";
 import type { SendError } from "../src/telegram";
+import { failingDb } from "./failing-db";
 import { fakeTelegram as fakeBotApi, messageUpdate, testConfig, webhookRequest } from "./telegram";
 
 const db = env.DB;
@@ -402,22 +403,7 @@ describe("chats that can't be reached", () => {
   it("stops sending, and still finishes the run, when D1 fails while updating the chat", async () => {
     await subscribe(20, 1);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const broken = new Proxy(db, {
-      get(target, prop) {
-        if (prop === "prepare") {
-          return (sql: string) => {
-            if (sql.includes("SET is_active = 0")) {
-              throw new Error("D1 down");
-            }
-            return target.prepare(sql);
-          };
-        }
-        const value: unknown = Reflect.get(target, prop);
-        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-      },
-    });
-
-    const summary = await run({ telegram: fakeTelegram(() => "blocked"), database: broken });
+    const summary = await run({ telegram: fakeTelegram(() => "blocked"), database: failingDb(db, /SET is_active = 0/) });
 
     expect(summary.sendErrors).toEqual(["blocked"]);
     expect(summary.notificationsLeft).toBe(1);
@@ -458,6 +444,22 @@ describe("run safety", () => {
     await expect(run({ database: broken })).rejects.toThrow("D1 down");
     expect(await acquireStarCheckLock(db, Date.now(), Date.now() + 1000)).toBe(true);
     await releaseStarCheckLock(db);
+  });
+
+  it("reports the run's own error when releasing the lock fails too", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const outage = failingDb(failingDb(db, /locked_until = NULL/, "release failed"), /SELECT cursor/, "load failed");
+
+    await expect(run({ database: outage })).rejects.toThrow("load failed");
+
+    expect(error.mock.calls.map((call) => String(call[0])).join(" ")).toContain("Star check lock not released");
+    // The lock is still held; beforeEach clears it for the next test.
+  });
+
+  it("fails a successful run whose lock release fails, so it's recorded and alerted on", async () => {
+    await expect(run({ database: failingDb(db, /locked_until = NULL/, "release failed") })).rejects.toThrow(
+      "release failed",
+    );
   });
 
   it("stays within the subrequest budget with 1,000 repositories", async () => {

@@ -6,7 +6,7 @@ import type { AppConfig } from "./config";
 import { ensureChat, markChatReachable, migrateChat, setChatActive } from "./db";
 import { assertNever } from "./result";
 import * as messages from "./messages";
-import { replyHtml } from "./telegram";
+import { hasReplied, replyHtml } from "./telegram";
 import { errorMessage } from "./errors";
 
 export type { CommandHandler } from "./commands";
@@ -133,14 +133,25 @@ async function onMembershipChange(db: D1Database, chatId: number, status: Member
   }
 }
 
-function logUpdateError(error: BotError): void {
+/**
+ * Logs a failed update (a D1 outage, a bug) and tells the user, so a command
+ * never goes unanswered. No error reply when the handler already answered
+ * (the user has a reply; an error after it would contradict it), or for
+ * membership updates (nobody to answer). replyHtml logs a refused reply;
+ * anything else it throws reaches handleWebhook, which logs it and still
+ * answers 200.
+ */
+async function onUpdateError(error: BotError): Promise<void> {
   console.error(
     JSON.stringify({
       message: "Update failed",
       updateId: error.ctx.update.update_id,
-      error: error.error instanceof Error ? error.error.message : String(error.error),
+      error: errorMessage(error.error),
     }),
   );
+  if (error.ctx.message?.text !== undefined && !hasReplied(error.ctx)) {
+    await replyHtml(error.ctx, messages.somethingWentWrong());
+  }
 }
 
 export function createBot(config: AppConfig, deps: BotDeps): Bot {
@@ -161,10 +172,10 @@ export function createBot(config: AppConfig, deps: BotDeps): Bot {
     ...deps.commandHandlers,
   };
 
-  // One failed update must never affect others: log it and answer 200, so
-  // Telegram doesn't redeliver it. (bot.catch only applies to long polling;
+  // One failed update must never affect others: log it, tell the user, and
+  // answer 200, so Telegram doesn't redeliver it. (bot.catch only applies to long polling;
   // with webhooks, errors need an error boundary around the handlers.)
-  const guarded = bot.errorBoundary(logUpdateError);
+  const guarded = bot.errorBoundary(onUpdateError);
   guarded.use(allowedChatsOnly(config.allowedChatIds));
   guarded.on("my_chat_member", (ctx) =>
     onMembershipChange(deps.db, ctx.myChatMember.chat.id, ctx.myChatMember.new_chat_member.status),

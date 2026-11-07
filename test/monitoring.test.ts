@@ -5,6 +5,7 @@ import { handleFetch } from "../src/http";
 import { alertAdmin, recordRun, starCheckHealth, STALE_AFTER_MS } from "../src/monitoring";
 import { githubSeverity, handleScheduled, judge, type GitHubSeverity } from "../src/scheduled";
 import type { RunSummary } from "../src/star-check";
+import { failingDb } from "./failing-db";
 import { fakeTelegram, testConfig } from "./telegram";
 
 const db = env.DB;
@@ -14,27 +15,6 @@ const DAY = 24 * 60 * MINUTE;
 
 function run(scheduledTime: number, ok: boolean) {
   return recordRun(db, { scheduledTime, ok, details: { ok } }, null);
-}
-
-/** A D1 binding whose statements matching `pattern` throw. */
-function failingDb(pattern: RegExp): D1Database {
-  return new Proxy(db, {
-    get(target, prop) {
-      if (prop === "prepare") {
-        return (sql: string) => {
-          if (pattern.test(sql)) {
-            throw new Error("D1 down");
-          }
-          return target.prepare(sql);
-        };
-      }
-      if (prop === "batch" && pattern.source === ".") {
-        return () => Promise.reject(new Error("D1 down"));
-      }
-      const value: unknown = Reflect.get(target, prop);
-      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-    },
-  });
 }
 
 beforeEach(async () => {
@@ -113,6 +93,19 @@ describe("GET /health/star-check", () => {
     expect(stale.status).toBe(503);
     expect(await stale.json()).toMatchObject({ status: "stale" });
   });
+
+  it("answers 503 unknown, and logs, when D1 can't be read", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await handleFetch(new Request("https://bot.test/health/star-check"), {
+      config: testConfig(),
+      db: failingDb(db, "everything"),
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: "unknown", lastSuccessAt: null, lastRunOk: null });
+    expect(String(error.mock.calls[0]?.[0])).toContain("Star check health unknown");
+  });
 });
 
 describe("alertAdmin", () => {
@@ -146,7 +139,7 @@ describe("alertAdmin", () => {
   it("still alerts when D1 is down, because that's when it matters", async () => {
     const telegram = fakeTelegram();
 
-    const outcome = await alertAdmin(withAdmin, { db: failingDb(/last_alert_at/), telegramFetch: telegram.fetch }, "D1 down", NOON);
+    const outcome = await alertAdmin(withAdmin, { db: failingDb(db, /last_alert_at/), telegramFetch: telegram.fetch }, "D1 down", NOON);
 
     expect(outcome).toBe("sent");
     expect(telegram.calls).toHaveLength(1);
@@ -255,7 +248,7 @@ describe("handleScheduled", () => {
   });
 
   it("rethrows a crash with its original error, after recording it", async () => {
-    const crashing = failingDb(/./);
+    const crashing = failingDb(db, "everything");
     let thrown: unknown;
 
     try {
@@ -266,6 +259,20 @@ describe("handleScheduled", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toBe("D1 down");
+  });
+
+  it("alerts on a crash when D1 is down, though the health can't be read", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const telegram = fakeTelegram();
+
+    await expect(
+      handleScheduled({ scheduledTime: NOON }, testConfig({ ADMIN_CHAT_ID: "42" }), {
+        db: failingDb(db, "everything"),
+        telegramFetch: telegram.fetch,
+      }),
+    ).rejects.toThrow("D1 down");
+
+    expect(telegram.calls.filter((call) => call.method === "sendMessage")).toHaveLength(1);
   });
 
   it("doesn't record a run skipped because another run holds the lock", async () => {

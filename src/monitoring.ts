@@ -41,7 +41,9 @@ export async function recordRun(db: D1Database, run: RunRecord, prune: { now: nu
 export type StarCheckHealth =
   | { status: "ok"; lastSuccessAt: string; lastRunOk: boolean }
   | { status: "stale"; lastSuccessAt: string; lastRunOk: boolean }
-  | { status: "no-successful-run"; lastSuccessAt: null; lastRunOk: boolean | null };
+  | { status: "no-successful-run"; lastSuccessAt: null; lastRunOk: boolean | null }
+  /** D1 couldn't be read. */
+  | { status: "unknown"; lastSuccessAt: null; lastRunOk: null };
 
 /**
  * Whether star checks are running: the last successful run must be within
@@ -61,6 +63,19 @@ export async function starCheckHealth(db: D1Database, now: number): Promise<Star
   return { status: fresh ? "ok" : "stale", lastSuccessAt, lastRunOk: lastRunOk ?? false };
 }
 
+/**
+ * starCheckHealth, or "unknown" (and a log line) when D1 can't be read: the
+ * health endpoint and the alert decision must still answer during an outage.
+ */
+export async function readStarCheckHealth(db: D1Database, now: number): Promise<StarCheckHealth> {
+  try {
+    return await starCheckHealth(db, now);
+  } catch (error) {
+    console.error(JSON.stringify({ message: "Star check health unknown", error: errorMessage(error) }));
+    return { status: "unknown", lastSuccessAt: null, lastRunOk: null };
+  }
+}
+
 /** HTTP status for /health/star-check. */
 export function healthStatusCode(health: StarCheckHealth): number {
   switch (health.status) {
@@ -68,6 +83,7 @@ export function healthStatusCode(health: StarCheckHealth): number {
       return 200;
     case "stale":
     case "no-successful-run":
+    case "unknown":
       return 503;
     default:
       return assertNever(health);

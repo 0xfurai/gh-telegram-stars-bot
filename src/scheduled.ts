@@ -12,7 +12,7 @@
 import type { AppConfig } from "./config";
 import { errorMessage } from "./errors";
 import type { GitHubError } from "./github";
-import { alertAdmin, recordRun, starCheckHealth, type StarCheckHealth } from "./monitoring";
+import { alertAdmin, readStarCheckHealth, recordRun, type StarCheckHealth } from "./monitoring";
 import { assertNever } from "./result";
 import { isPruneRun, runStarCheck, type RunSummary, type StarCheckDeps } from "./star-check";
 
@@ -113,7 +113,7 @@ async function alertDue(db: D1Database, when: AlertWhen, now: number): Promise<b
     case "now":
       return true;
     case "if-stale":
-      return healthNeedsAlert((await starCheckHealth(db, now)).status);
+      return healthNeedsAlert((await readStarCheckHealth(db, now)).status);
     default:
       return assertNever(when);
   }
@@ -123,8 +123,10 @@ function healthNeedsAlert(status: StarCheckHealth["status"]): boolean {
   switch (status) {
     case "ok":
       return false;
+    // "unknown" means D1 is down: alert (fail open), as alertAdmin does when it can't throttle.
     case "stale":
     case "no-successful-run":
+    case "unknown":
       return true;
     default:
       return assertNever(status);

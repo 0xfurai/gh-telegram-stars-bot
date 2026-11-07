@@ -1,11 +1,10 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { acquireStarCheckLock, getStarCheckCursor, releaseStarCheckLock } from "../src/db";
+import { acquireStarCheckLock, getStarCheckCursor, markChatReachable, releaseStarCheckLock } from "../src/db";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "../src/messages";
 import { handleFetch } from "../src/http";
 import {
-  afterSendFailure,
-  deactivatesChat,
+  failurePolicy,
   groupDeliveries,
   isPruneRun,
   runStarCheck,
@@ -47,7 +46,7 @@ const githubFetch: typeof fetch = (_input, init) => {
   );
 };
 
-type TelegramReply = "ok" | "blocked" | "chat-not-found" | "too-long" | "rate-limited" | "down";
+type TelegramReply = "ok" | "blocked" | "chat-not-found" | "migrated" | "too-long" | "rate-limited" | "down";
 
 interface Sent {
   chatId: number;
@@ -71,6 +70,16 @@ function fakeTelegram(replyFor: (chatId: number) => TelegramReply = () => "ok") 
         Response.json({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }, { status: 403 }),
       "chat-not-found": () =>
         Response.json({ ok: false, error_code: 400, description: "Bad Request: chat not found" }, { status: 400 }),
+      migrated: () =>
+        Response.json(
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: group chat was upgraded to a supergroup chat",
+            parameters: { migrate_to_chat_id: -1009 },
+          },
+          { status: 400 },
+        ),
       "too-long": () =>
         Response.json({ ok: false, error_code: 400, description: "Bad Request: message is too long" }, { status: 400 }),
       "rate-limited": () =>
@@ -249,7 +258,7 @@ describe("star check", () => {
     expect(summary.notificationsLeft).toBe(2);
   });
 
-  it("keeps going after a blocked chat, which stays due", async () => {
+  it("keeps going to other chats after a blocked one", async () => {
     await addRepo(1, 100);
     await subscribe(10, 1);
     await subscribe(20, 1);
@@ -358,17 +367,61 @@ describe("chats that can't be reached", () => {
 
     // 25 repositories need 2 messages; only the first is tried.
     expect(telegram.attempts).toEqual([10]);
+    expect(summary.notificationsForUnreachableChats).toBe(5);
     expect(summary.chatsDeactivated).toBe(1);
   });
 
-  it.each<[SendError, boolean]>([
-    [{ kind: "blocked", description: "blocked" }, true],
-    [{ kind: "chat-not-found" }, true],
-    [{ kind: "rate-limited", retryAfter: 3 }, false],
-    [{ kind: "unavailable", message: "down" }, false],
-    [{ kind: "rejected", code: 400, description: "too long" }, false],
-  ])("deactivates after %j: %s", (error, expected) => {
-    expect(deactivatesChat(error)).toBe(expected);
+  it("doesn't deactivate a chat that became reachable while the send was in flight", async () => {
+    const telegram = fakeTelegram(() => "blocked");
+    const slowBlocked: typeof fetch = async (input, init) => {
+      // The user unblocks the bot (my_chat_member) while the send is still out.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await markChatReachable(db, 10);
+      return telegram.fetch(input, init);
+    };
+
+    const summary = await run({ telegram: { ...telegram, fetch: slowBlocked } });
+
+    expect(summary.chatsDeactivated).toBe(0);
+    expect(await isActive(10)).toBe(1);
+  });
+
+  it("moves a group that became a supergroup to its new ID, and notifies it there next run", async () => {
+    const summary = await run({ telegram: fakeTelegram(() => "migrated") });
+
+    expect(summary.chatsMigrated).toBe(1);
+    expect(await isActive(10)).toBe(0);
+    expect(await lastNotified(-1009, 1)).toBe(100);
+    expect(await lastNotified(10, 1)).toBeNull();
+
+    const telegram = fakeTelegram();
+    await run({ telegram });
+    expect(telegram.sent.map((m) => m.chatId)).toEqual([-1009]);
+  });
+
+  it("stops sending, and still finishes the run, when D1 fails while updating the chat", async () => {
+    await subscribe(20, 1);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const broken = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("SET is_active = 0")) {
+              throw new Error("D1 down");
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value: unknown = Reflect.get(target, prop);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    const summary = await run({ telegram: fakeTelegram(() => "blocked"), database: broken });
+
+    expect(summary.sendErrors).toEqual(["blocked"]);
+    expect(summary.notificationsLeft).toBe(1);
+    expect(error.mock.calls.map((call) => String(call[0])).join(" ")).toContain("Chat not updated");
   });
 });
 
@@ -575,13 +628,15 @@ describe("building deliveries", () => {
     expect(() => starNotifications(Array.from({ length: MAX_UPDATES_PER_MESSAGE + 1 }, () => update))).toThrow(RangeError);
   });
 
-  it.each<[SendError, string]>([
-    [{ kind: "rate-limited", retryAfter: 3 }, "stop-sending"],
-    [{ kind: "unavailable", message: "down" }, "stop-sending"],
-    [{ kind: "blocked", description: "blocked" }, "next-delivery"],
-    [{ kind: "chat-not-found" }, "next-delivery"],
-    [{ kind: "rejected", code: 400, description: "too long" }, "next-delivery"],
-  ])("after %j: %s", (error, expected) => {
-    expect(afterSendFailure(error)).toBe(expected);
+  it.each<[SendError, string, string, string]>([
+    [{ kind: "rate-limited", retryAfter: 3 }, "keep", "retry", "stop-sending"],
+    [{ kind: "unavailable", message: "down" }, "keep", "retry", "stop-sending"],
+    [{ kind: "blocked", description: "blocked" }, "deactivate", "retry", "next-delivery"],
+    [{ kind: "chat-not-found" }, "deactivate", "retry", "next-delivery"],
+    [{ kind: "chat-migrated", newChatId: -1009 }, "migrate", "retry", "next-delivery"],
+    [{ kind: "rejected", code: 400, description: "too long" }, "keep", "drop", "next-delivery"],
+  ])("after %j: chat %s, notification %s, %s", (error, chat, notification, sending) => {
+    const policy = failurePolicy(error);
+    expect([policy.chat.kind, policy.notification, policy.sending]).toEqual([chat, notification, sending]);
   });
 });

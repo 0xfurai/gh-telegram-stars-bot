@@ -3,7 +3,8 @@ import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { COMMANDS, type CommandName } from "./command-list";
 import { createCommandHandlers, handlePlainText, type CommandHandler } from "./commands";
 import type { AppConfig } from "./config";
-import { ensureChat } from "./db";
+import { ensureChat, markChatReachable, migrateChat, setChatActive } from "./db";
+import { assertNever } from "./result";
 import * as messages from "./messages";
 import { replyHtml } from "./telegram";
 
@@ -109,6 +110,28 @@ function allowedChatsOnly(allowed: ReadonlySet<number> | null): MiddlewareFn {
   };
 }
 
+type MemberStatus = "creator" | "administrator" | "member" | "restricted" | "left" | "kicked";
+
+/**
+ * Telegram tells the bot when its own membership changes (my_chat_member):
+ * a user blocked or unblocked it, or it was added to or removed from a group.
+ * That keeps is_active right even when nobody sends a message.
+ */
+async function onMembershipChange(db: D1Database, chatId: number, status: MemberStatus): Promise<void> {
+  switch (status) {
+    case "creator":
+    case "administrator":
+    case "member":
+    case "restricted":
+      return markChatReachable(db, chatId);
+    case "left":
+    case "kicked":
+      return setChatActive(db, chatId, false);
+    default:
+      return assertNever(status);
+  }
+}
+
 function logUpdateError(error: BotError): void {
   console.error(
     JSON.stringify({
@@ -142,6 +165,13 @@ export function createBot(config: AppConfig, deps: BotDeps): Bot {
   // with webhooks, errors need an error boundary around the handlers.)
   const guarded = bot.errorBoundary(logUpdateError);
   guarded.use(allowedChatsOnly(config.allowedChatIds));
+  guarded.on("my_chat_member", (ctx) =>
+    onMembershipChange(deps.db, ctx.myChatMember.chat.id, ctx.myChatMember.new_chat_member.status),
+  );
+  // A group became a supergroup: Telegram posts this in the old group.
+  guarded.on("message:migrate_to_chat_id", (ctx) =>
+    migrateChat(deps.db, ctx.chat.id, ctx.message.migrate_to_chat_id),
+  );
   guarded.on("message:text", dispatcher(deps.db, handlers));
   return bot;
 }

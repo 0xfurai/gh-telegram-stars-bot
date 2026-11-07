@@ -124,6 +124,58 @@ export async function ensureChat(db: D1Database, chatId: number): Promise<boolea
   return result.meta.changes > 0;
 }
 
+/**
+ * Marks a chat reachable after Telegram said so (the user unblocked the bot,
+ * or it was added back to the group). Always touches updated_at, so a
+ * deactivation based on an older failed send can't undo it.
+ */
+export async function markChatReachable(db: D1Database, chatId: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO chats (id) VALUES (?1)
+       ON CONFLICT (id) DO UPDATE SET is_active = 1, updated_at = ${NOW}`,
+    )
+    .bind(chatId)
+    .run();
+}
+
+/**
+ * Marks a chat inactive after a send that started at `sendStartedAt` failed
+ * because the chat can't be reached, unless the chat was reactivated since.
+ * Returns true if it was deactivated.
+ */
+export async function deactivateChat(db: D1Database, chatId: number, sendStartedAt: string): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE chats SET is_active = 0, updated_at = ${NOW}
+       WHERE id = ?1 AND is_active = 1 AND updated_at <= ?2`,
+    )
+    .bind(chatId, sendStartedAt)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * A group became a supergroup with a new ID: move its subscriptions to the new
+ * chat (keeping what it was last told), and deactivate the old one. One batch.
+ */
+export async function migrateChat(db: D1Database, oldChatId: number, newChatId: number): Promise<void> {
+  await db.batch([
+    db
+      .prepare(`INSERT INTO chats (id) VALUES (?1) ON CONFLICT (id) DO UPDATE SET is_active = 1, updated_at = ${NOW}`)
+      .bind(newChatId),
+    db
+      .prepare(
+        `INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars, created_at)
+         SELECT ?2, repository_id, last_notified_stars, created_at FROM chat_repositories WHERE chat_id = ?1
+         ON CONFLICT (chat_id, repository_id) DO NOTHING`,
+      )
+      .bind(oldChatId, newChatId),
+    db.prepare("DELETE FROM chat_repositories WHERE chat_id = ?").bind(oldChatId),
+    db.prepare(`UPDATE chats SET is_active = 0, updated_at = ${NOW} WHERE id = ?`).bind(oldChatId),
+  ]);
+}
+
 /** Marks a chat inactive (for example after the bot was blocked) or active. */
 export async function setChatActive(db: D1Database, chatId: number, active: boolean): Promise<void> {
   await db

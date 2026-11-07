@@ -21,7 +21,8 @@
     "telegram:setup": "node scripts/telegram-setup.ts",
     "migrate:copy": "node scripts/copy-to-d1.ts",
     "migrate:verify": "node scripts/verify-copy.ts",
-    "migrate:copy-back": "node scripts/copy-back-to-supabase.ts"
+    "migrate:copy-back": "node scripts/copy-back-to-supabase.ts",
+    "shadow:compare": "node scripts/compare-shadow.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",

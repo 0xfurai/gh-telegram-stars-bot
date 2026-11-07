@@ -81,12 +81,14 @@ export function removeUsage(): string {
 /** Why the input isn't a repository, in words. */
 export function invalidRepository(error: RepositoryInputError): string {
   switch (error) {
-    case "empty":
-      return "Send a repository: <code>owner/repo</code> or a GitHub URL.";
     case "not-github":
       return "I only follow GitHub repositories. Send <code>owner/repo</code> or a <code>github.com</code> URL.";
     case "invalid-name":
-      return "That isn't a valid GitHub repository name. Owners use letters, digits and single hyphens; repository names may also use <code>_</code> and <code>.</code>.";
+      return [
+        "That isn't a valid GitHub repository name.",
+        "• Owner: 1-39 letters, digits or single hyphens, not starting or ending with one.",
+        "• Repository: 1-100 letters, digits, <code>-</code>, <code>_</code> or <code>.</code>, and not <code>.</code> or <code>..</code>.",
+      ].join("\n");
     case "not-a-repository":
       return "That doesn't look like a GitHub repository. Use <code>owner/repo</code> or a GitHub URL.";
     default:

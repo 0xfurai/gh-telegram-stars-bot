@@ -77,37 +77,18 @@ function subscribeReply(outcome: SubscribeOutcome, repo: Repository, maxReposPer
   }
 }
 
-/** What the chat's own subscriptions already say about an /add. */
-type Precheck =
-  | { kind: "already-subscribed"; fullName: string }
-  | { kind: "limit-reached" }
-  | { kind: "look-up" };
-
 /**
  * Answers /add from the chat's own subscriptions when that's enough, before
  * any GitHub call or write: already subscribed (by name), or at the limit.
+ * Null when the repository needs looking up.
  */
-function precheck(subscriptions: readonly Repository[], input: RepositoryName, max: number): Precheck {
+function precheckReply(subscriptions: readonly Repository[], input: RepositoryName, max: number): string | null {
   const wanted = `${input.owner}/${input.name}`.toLowerCase();
   const existing = subscriptions.find((repo) => repo.fullName.toLowerCase() === wanted);
   if (existing) {
-    return { kind: "already-subscribed", fullName: existing.fullName };
+    return messages.alreadySubscribed(existing.fullName);
   }
-  return subscriptions.length >= max ? { kind: "limit-reached" } : { kind: "look-up" };
-}
-
-/** The reply when the precheck answers /add on its own, or null to look the repository up. */
-function precheckReply(check: Precheck, max: number): string | null {
-  switch (check.kind) {
-    case "already-subscribed":
-      return messages.alreadySubscribed(check.fullName);
-    case "limit-reached":
-      return messages.limitReached(max);
-    case "look-up":
-      return null;
-    default:
-      return assertNever(check);
-  }
+  return subscriptions.length >= max ? messages.limitReached(max) : null;
 }
 
 function chatIdOf(ctx: Context): number {
@@ -130,7 +111,7 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
       return replyHtml(ctx, messages.invalidRepository(parsed.error));
     }
     const input = parsed.value;
-    const early = precheckReply(precheck(await listSubscriptions(deps.db, chatIdOf(ctx)), input, max), max);
+    const early = precheckReply(await listSubscriptions(deps.db, chatIdOf(ctx)), input, max);
     if (early !== null) {
       return replyHtml(ctx, early);
     }

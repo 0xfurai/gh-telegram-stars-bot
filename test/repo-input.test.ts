@@ -24,8 +24,16 @@ describe("parseRepositoryInput", () => {
   });
 
   it.each<[string, RepositoryInputError]>([
-    ["", "empty"],
-    ["   ", "empty"],
+    ["", "not-a-repository"],
+    ["   ", "not-a-repository"],
+    ["owner/re po", "not-a-repository"],
+    ["owner/", "not-a-repository"],
+    ["/repo", "not-a-repository"],
+    ["ftp://github.com/a/b", "not-a-repository"],
+    ["https:/github.com/a/b", "not-a-repository"],
+    ["gitlab.com/owner/repo", "not-github"],
+    ["gitlab.com/owner", "not-github"],
+    ["t.me/foo", "not-github"],
     ["react", "not-a-repository"],
     ["yes/no maybe", "not-a-repository"],
     ["a/b/c", "not-a-repository"],

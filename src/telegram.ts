@@ -21,19 +21,23 @@ export type SendError =
   /** 5xx or a network failure: try again later. */
   | { kind: "unavailable"; message: string };
 
+function fromBadRequest(code: number, description: string, newChatId: number | undefined): SendError {
+  // A group upgraded to a supergroup: Telegram's 400 carries the new ID.
+  if (newChatId !== undefined) {
+    return { kind: "chat-migrated", newChatId };
+  }
+  return /chat not found/i.test(description) ? { kind: "chat-not-found" } : { kind: "rejected", code, description };
+}
+
 function fromApiError(error: GrammyError): SendError {
   const { error_code: code, description, parameters } = error;
-  // Telegram reports a group upgraded to a supergroup as a 400 carrying the new ID.
-  if (parameters.migrate_to_chat_id !== undefined) {
-    return { kind: "chat-migrated", newChatId: parameters.migrate_to_chat_id };
-  }
   switch (code) {
     case 403:
       return { kind: "blocked", description };
     case 429:
       return { kind: "rate-limited", retryAfter: parameters.retry_after ?? 1 };
     case 400:
-      return /chat not found/i.test(description) ? { kind: "chat-not-found" } : { kind: "rejected", code, description };
+      return fromBadRequest(code, description, parameters.migrate_to_chat_id);
     default:
       return code >= 500 ? { kind: "unavailable", message: description } : { kind: "rejected", code, description };
   }

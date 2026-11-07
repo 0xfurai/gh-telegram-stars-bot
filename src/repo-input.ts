@@ -14,21 +14,25 @@ export interface RepositoryName {
 
 /** Why the input isn't a repository; each gets its own reply. */
 export type RepositoryInputError =
-  /** Nothing was given. */
-  | "empty"
-  /** A URL, but not on GitHub. */
+  /** A link, but not to GitHub (with or without a scheme). */
   | "not-github"
   /** The shape is right, but the owner or repository name breaks GitHub's rules. */
   | "invalid-name"
-  /** Not owner/repo or a repository URL (one part, three parts, spaces, a profile URL). */
+  /** Not owner/repo or a repository link: empty, one part, three parts, spaces, a profile link. */
   | "not-a-repository";
 
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const REPOSITORY = /^[A-Za-z0-9._-]{1,100}$/;
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
+const HTTP_URL = /^https?:\/\//i;
+// Any other scheme ("ftp:"), or a mistyped one ("https:/github.com").
+const OTHER_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
 function validName(owner: string, name: string): Result<RepositoryName, RepositoryInputError> {
   const repo = name.endsWith(".git") ? name.slice(0, -".git".length) : name;
+  if (owner === "" || repo === "") {
+    return err("not-a-repository");
+  }
   const valid = OWNER.test(owner) && REPOSITORY.test(repo) && repo !== "." && repo !== "..";
   return valid ? ok({ owner, name: repo }) : err("invalid-name");
 }
@@ -36,7 +40,7 @@ function validName(owner: string, name: string): Result<RepositoryName, Reposito
 function fromUrl(input: string): Result<RepositoryName, RepositoryInputError> {
   let url: URL;
   try {
-    url = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    url = new URL(HTTP_URL.test(input) ? input : `https://${input}`);
   } catch {
     return err("not-a-repository");
   }
@@ -48,18 +52,26 @@ function fromUrl(input: string): Result<RepositoryName, RepositoryInputError> {
   return owner !== undefined && name !== undefined ? validName(owner, name) : err("not-a-repository");
 }
 
+/**
+ * A link: an http(s) URL, or a host typed without a scheme. GitHub owner
+ * names can't contain dots, so a dotted first part ("gitlab.com/...",
+ * "github.com/...") is a host.
+ */
+function looksLikeLink(input: string): boolean {
+  return HTTP_URL.test(input) || (input.split("/")[0] ?? "").includes(".");
+}
+
 /** "owner/repo", "https://github.com/owner/repo[...]" or "github.com/owner/repo". */
 export function parseRepositoryInput(text: string): Result<RepositoryName, RepositoryInputError> {
   const input = text.trim();
-  if (input === "") {
-    return err("empty");
-  }
-  if (/\s/.test(input)) {
+  if (input === "" || /\s/.test(input)) {
     return err("not-a-repository");
   }
-  // Any http(s) URL, or "github.com/..." without a scheme.
-  if (/^https?:\/\//i.test(input) || /github\.com\//i.test(input)) {
+  if (looksLikeLink(input)) {
     return fromUrl(input);
+  }
+  if (OTHER_SCHEME.test(input)) {
+    return err("not-a-repository");
   }
   const [owner, name, ...rest] = input.split("/");
   return owner !== undefined && name !== undefined && rest.length === 0

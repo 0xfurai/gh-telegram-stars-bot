@@ -1,15 +1,23 @@
 {
   "compilerOptions": {
     "target": "es2024",
-    "lib": ["es2024"],
+    "lib": [
+      "es2024"
+    ],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["vitest.config.ts", "eslint.config.js"]
+  "include": [
+    "vitest.config.ts",
+    "eslint.config.js"
+  ]
 }

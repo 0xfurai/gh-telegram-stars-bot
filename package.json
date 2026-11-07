@@ -32,5 +32,8 @@
   "trustedDependencies": [
     "esbuild",
     "workerd"
-  ]
+  ],
+  "dependencies": {
+    "zod": "4.6.7"
+  }
 }

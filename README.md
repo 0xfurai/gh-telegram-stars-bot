@@ -34,8 +34,11 @@ Use `bun run test`, not `bun test`: `bun test` starts Bun's own test runner inst
 
 ### Local settings and secrets
 
-* Local values go in `.dev.vars`. It's ignored by git; never commit it.
-* Secret names are declared in `wrangler.jsonc` under `secrets.required`. Generated types come from that list, not from your local files, so CI and your machine always agree.
+* Local values go in `.dev.vars`. It's ignored by git; never commit it. `.dev.vars.example` lists every setting; use a test bot, never the production one.
+* Every setting is validated at startup (`src/config.ts`). With an invalid or missing setting, the Worker answers every request with 503, fails scheduled runs, and logs which settings are wrong (never their values). `NOTIFICATIONS` has no default on purpose.
+* Settings without a default are secrets, declared in `wrangler.jsonc` under `secrets.required` and set with `wrangler secret put <NAME>`. Secrets survive deploys, and changing one (for example `NOTIFICATIONS=off` in an emergency) takes effect without a code deploy.
+* Settings with a default (`MAX_REPOS_PER_CHAT`, `ALLOWED_CHAT_IDS`, `ADMIN_CHAT_ID`) live in `wrangler.jsonc` under `vars`. Change them there, never in the Cloudflare dashboard: `wrangler deploy` removes plain settings that aren't in the file.
+* `wrangler dev` only loads `.dev.vars` keys that are declared in `secrets.required` or `vars`. Generated types come from those lists too, not from your local files, so CI and your machine always agree.
 * Wrangler falls back to a root `.env` when `.dev.vars` is missing. Keep a `.dev.vars` file, and don't keep a root `.env` in this repo.
 
 ### Database (D1)

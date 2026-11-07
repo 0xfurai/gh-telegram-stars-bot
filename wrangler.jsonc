@@ -3,11 +3,30 @@
   "name": "gh-telegram-stars-bot",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-19",
-  // Declared secrets. This list, not .dev.vars or .env, decides the secret
-  // names in the generated types, so they don't depend on local files.
-  // Filled in by GSB-3.
+  // Every setting is validated at startup (src/config.ts); with an invalid one
+  // the Worker answers 503 and fails scheduled runs.
+  //
+  // Settings without a default are secrets: set them with
+  // `wrangler secret put <NAME>`, locally in .dev.vars. Secrets survive deploys,
+  // and changing NOTIFICATIONS this way (for example to "off" in an emergency)
+  // takes effect without a code deploy. NOTIFICATIONS deliberately has no
+  // default, so a new environment can't start sending by accident.
+  //
+  // This list, not .dev.vars or .env, decides the secret names in the
+  // generated types. `wrangler dev` only loads .dev.vars keys that are listed
+  // here or in "vars".
   "secrets": {
-    "required": []
+    "required": ["TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN", "WEBHOOK_SECRET", "NOTIFICATIONS", "BOT_INFO"]
+  },
+  // Plain settings with defaults. Change them here (or per environment in this
+  // file), never in the dashboard: `wrangler deploy` removes plain settings
+  // that aren't in this file.
+  "vars": {
+    "MAX_REPOS_PER_CHAT": "50",
+    // Comma-separated chat IDs that may use the bot; empty means everyone.
+    "ALLOWED_CHAT_IDS": "",
+    // Chat that receives failed-run alerts; empty turns them off.
+    "ADMIN_CHAT_ID": ""
   },
   "observability": {
     "enabled": true

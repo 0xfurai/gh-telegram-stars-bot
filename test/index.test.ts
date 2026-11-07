@@ -1,4 +1,4 @@
-import { createScheduledController } from "cloudflare:test";
+import { createScheduledController, env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as mainModule from "../src/index";
@@ -58,7 +58,7 @@ describe("scheduled", () => {
       cron: "*/5 * * * *",
     });
 
-    worker.scheduled(controller);
+    worker.scheduled(controller, env);
 
     expect(log).toHaveBeenCalledOnce();
     const entry: unknown = JSON.parse(String(log.mock.calls[0]?.[0]));
@@ -66,6 +66,7 @@ describe("scheduled", () => {
       message: "Star check placeholder ran",
       cron: "*/5 * * * *",
       scheduledTime: "2026-11-06T12:00:00.000Z",
+      notifications: "dry-run",
     });
   });
 });

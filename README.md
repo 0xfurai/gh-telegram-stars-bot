@@ -68,6 +68,29 @@ Bun only runs install scripts for packages listed in `trustedDependencies` in `p
 bun pm untrusted
 ```
 
+## Telegram webhook
+
+Telegram sends updates to `POST /webhook` on the Worker. Requests without the right `X-Telegram-Bot-Api-Secret-Token` (the `WEBHOOK_SECRET` setting) get 401.
+
+To point a bot at a deployed Worker and register its command menu:
+
+```sh
+TELEGRAM_BOT_TOKEN=... WEBHOOK_SECRET=... WORKER_URL=https://<worker-host> bun run telegram:setup
+```
+
+Use the same token and secret as the Worker's secrets. The script:
+
+1. Checks the token (`getMe`) and prints the `BOT_INFO` value to store with `wrangler secret put BOT_INFO`.
+2. Refuses to continue unless the Worker's `/health` answers 200. A 503 means a setting is missing or invalid: store it and run the script again.
+3. Sets the webhook, keeping pending updates so messages sent during a switch reach the Worker, and registers the command menu.
+
+Every webhook request gets 200 once the secret checks out, so Telegram never redelivers an update:
+
+* A handler that throws is logged as `"Update failed"` with the update ID.
+* A reply Telegram refuses (blocked, rate-limited, chat gone) is logged as `"Reply not sent"` with the reason.
+* A body that isn't JSON is logged as `"Webhook request failed"`.
+* An update that takes over 20 seconds gets its 200 early.
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

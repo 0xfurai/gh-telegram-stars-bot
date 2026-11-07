@@ -10,7 +10,7 @@ export default {
     if (!settings.ok) {
       return misconfigured();
     }
-    return handleFetch(request);
+    return handleFetch(request, { config: settings.value });
   },
 
   scheduled(controller, env) {

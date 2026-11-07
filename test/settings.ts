@@ -10,5 +10,8 @@ export const TEST_SETTINGS = {
     is_bot: true,
     first_name: "Test bot",
     username: "test_bot",
+    can_join_groups: true,
+    can_read_all_group_messages: false,
+    supports_inline_queries: false,
   }),
 } as const;

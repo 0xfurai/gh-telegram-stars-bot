@@ -73,11 +73,16 @@ function parseJson(value: string, ctx: z.core.ParsePayload): unknown {
 }
 
 /** The bot's `getMe` result. grammY needs it to skip a getMe call per update. */
+// The fields every getMe result has. Fields added in later Bot API versions
+// pass through unchanged.
 const botInfoSchema = z.looseObject({
   id: z.number().check(z.int()),
   is_bot: z.literal(true),
   first_name: z.string(),
   username: z.string(),
+  can_join_groups: z.boolean(),
+  can_read_all_group_messages: z.boolean(),
+  supports_inline_queries: z.boolean(),
 });
 
 const settingsShape = {

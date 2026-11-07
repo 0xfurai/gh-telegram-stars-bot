@@ -1,0 +1,185 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BotOptions } from "../src/bot";
+import { handleFetch } from "../src/http";
+import { TEST_SETTINGS } from "./settings";
+import { fakeTelegram, messageUpdate, testConfig, webhookRequest } from "./telegram";
+
+interface DeliverOptions {
+  allowed?: string;
+  fail?: boolean;
+  secret?: string | null;
+  commandHandlers?: BotOptions["commandHandlers"];
+}
+
+async function deliver(update: unknown, options: DeliverOptions = {}) {
+  const telegram = fakeTelegram({ fail: options.fail });
+  const config = testConfig(options.allowed ? { ALLOWED_CHAT_IDS: options.allowed } : {});
+  const response = await handleFetch(webhookRequest(update, options.secret), {
+    config,
+    telegramFetch: telegram.fetch,
+    commandHandlers: options.commandHandlers,
+  });
+  return { response, calls: telegram.calls };
+}
+
+function sentTexts(calls: { method: string; body: Record<string, unknown> }[]): unknown[] {
+  return calls.filter((call) => call.method === "sendMessage").map((call) => call.body.text);
+}
+
+/** Records the arguments of each /add call. */
+function recordingAdd() {
+  const args: string[] = [];
+  const handlers: BotOptions["commandHandlers"] = {
+    add: (_ctx, commandArgs) => {
+      args.push(commandArgs);
+      return Promise.resolve();
+    },
+  };
+  return { args, handlers };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("POST /webhook: access", () => {
+  it("rejects requests without the right secret token, before touching the bot", async () => {
+    for (const secret of [null, "wrong-secret-wrong-secret-wrong-secret"]) {
+      const { response, calls } = await deliver(messageUpdate("/list"), { secret });
+
+      expect(response.status).toBe(401);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("only accepts POST", async () => {
+    const response = await handleFetch(new Request("https://bot.test/webhook"), { config: testConfig() });
+
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("POST");
+  });
+
+  it("ignores chats outside ALLOWED_CHAT_IDS and serves the ones inside", async () => {
+    const outside = await deliver(messageUpdate("/list", 99), { allowed: "1,2" });
+    const inside = await deliver(messageUpdate("/list", 2), { allowed: "1,2" });
+
+    expect(outside.response.status).toBe(200);
+    expect(outside.calls).toEqual([]);
+    expect(inside.calls).toHaveLength(1);
+  });
+});
+
+describe("POST /webhook: commands", () => {
+  it("runs a known command once", async () => {
+    const { response, calls } = await deliver(messageUpdate("/list"));
+
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("sendMessage");
+    expect(calls[0]?.body.chat_id).toBe(1);
+  });
+
+  it("runs /list@ThisBot once, without an 'Unknown command' reply", async () => {
+    const { calls } = await deliver(messageUpdate("/list@test_bot"));
+
+    expect(calls).toHaveLength(1);
+    expect(sentTexts(calls)[0]).not.toContain("Unknown command");
+  });
+
+  it("matches commands and the bot name case-insensitively", async () => {
+    const add = recordingAdd();
+
+    await deliver(messageUpdate("/ADD@Test_Bot owner/repo"), { commandHandlers: add.handlers });
+
+    expect(add.args).toEqual(["owner/repo"]);
+  });
+
+  it("passes the text after the command, trimmed", async () => {
+    const add = recordingAdd();
+
+    await deliver(messageUpdate("/add   https://github.com/facebook/react  "), { commandHandlers: add.handlers });
+    await deliver(messageUpdate("/add"), { commandHandlers: add.handlers });
+
+    expect(add.args).toEqual(["https://github.com/facebook/react", ""]);
+  });
+
+  it("finds the command when a formatting entity comes first", async () => {
+    const add = recordingAdd();
+    const update = messageUpdate("/add owner/repo");
+    update.message = {
+      ...update.message,
+      ...{
+        entities: [
+          { type: "bold", offset: 0, length: 4 },
+          { type: "bot_command", offset: 0, length: 4 },
+        ],
+      },
+    };
+
+    await deliver(update, { commandHandlers: add.handlers });
+
+    expect(add.args).toEqual(["owner/repo"]);
+  });
+
+  it("ignores commands addressed to another bot", async () => {
+    const { response, calls } = await deliver(messageUpdate("/list@other_bot"));
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([]);
+  });
+
+  it("answers /address with 'Unknown command' only, instead of running /add", async () => {
+    const { calls } = await deliver(messageUpdate("/address"));
+
+    expect(sentTexts(calls)).toEqual(["Unknown command. Type /help to see the available commands."]);
+  });
+
+  it("doesn't treat a command later in the text as a command", async () => {
+    const update = messageUpdate("see /help for details");
+    update.message = { ...update.message, ...{ entities: [{ type: "bot_command", offset: 4, length: 5 }] } };
+
+    const { calls } = await deliver(update);
+
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", () => {
+  it("logs a reply Telegram refused, as a warning", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { response } = await deliver(messageUpdate("/list"), { fail: true });
+
+    expect(response.status).toBe(200);
+    const entry = JSON.parse(String(warn.mock.calls[0]?.[0])) as { message: string; error: { kind: string } };
+    expect(entry.message).toBe("Reply not sent");
+    expect(entry.error.kind).toBe("unavailable");
+  });
+
+  it("logs a handler that throws, with the update ID", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { response } = await deliver(messageUpdate("/add x"), {
+      commandHandlers: { add: () => Promise.reject(new Error("boom")) },
+    });
+
+    expect(response.status).toBe(200);
+    const entry = JSON.parse(String(error.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(entry).toMatchObject({ message: "Update failed", error: "boom" });
+    expect(typeof entry.updateId).toBe("number");
+  });
+
+  it("logs a request body that isn't JSON", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const request = new Request("https://bot.test/webhook", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": TEST_SETTINGS.WEBHOOK_SECRET },
+      body: "{not json",
+    });
+
+    const response = await handleFetch(request, { config: testConfig(), telegramFetch: fakeTelegram().fetch });
+
+    expect(response.status).toBe(200);
+    expect(String(error.mock.calls[0]?.[0])).toContain("Webhook request failed");
+  });
+});

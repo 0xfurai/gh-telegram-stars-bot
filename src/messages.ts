@@ -178,9 +178,11 @@ export function unknownCommand(): string {
   return "Unknown command. Type /help to see the available commands.";
 }
 
-/** The star notification. `gained` is the change since this chat was last told. */
-/** "+5" or "−2", with a real minus sign. */
+/** "+5" or "−2", with a real minus sign. A change is never 0: nothing is due then. */
 function signed(change: number): string {
+  if (change === 0) {
+    throw new RangeError("A star change can't be 0");
+  }
   return change > 0 ? `+${number(change)}` : `\u2212${number(-change)}`;
 }
 
@@ -196,7 +198,8 @@ function changeHeading(changes: readonly number[]): string {
 
 /** One repository's change since the chat was last told: positive for gains, negative for losses. */
 export function starNotification(fullName: string, change: number, total: number): string {
-  const line = change > 0 ? `✨ +${count(change, "new star")}` : `💔 \u2212${count(-change, "star")}`;
+  const noun = Math.abs(change) === 1 ? "star" : "stars";
+  const line = change > 0 ? `✨ ${signed(change)} new ${noun}` : `💔 ${signed(change)} ${noun}`;
   return [changeHeading([change]), "", `📦 ${repositoryLink(fullName)}`, line, `⭐ ${count(total, "star")} in total`].join(
     "\n",
   );

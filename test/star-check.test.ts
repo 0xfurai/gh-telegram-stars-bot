@@ -225,6 +225,28 @@ describe("star check", () => {
     expect(telegram.sent).toEqual([{ chatId: 10, text: starNotifications([{ fullName: "owner/repo-1", change: -2, total: 98 }]) }]);
     expect(summary.repositoriesChanged).toBe(1);
     expect(await lastNotified(10, 1)).toBe(98);
+    expect((await db.prepare("SELECT stars_count FROM repositories").first("stars_count")) as number).toBe(98);
+  });
+
+  it("sends a flapping count at most one gain and one loss an hour", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    const telegram = fakeTelegram();
+    const at = (minutes: number, stars: number) => {
+      githubStars.set(1, stars);
+      return run({ telegram, at: NOON + minutes * 60_000 });
+    };
+
+    await at(0, 101); // gain: sent
+    await at(5, 100); // loss: within the hour, held
+    await at(10, 101); // back where the chat was told: nothing due
+    await at(15, 100); // held
+    await at(61, 100); // an hour after the last message: sent
+
+    expect(telegram.sent.map((m) => m.text)).toEqual([
+      starNotifications([{ fullName: "owner/repo-1", change: 1, total: 101 }]),
+      starNotifications([{ fullName: "owner/repo-1", change: -1, total: 100 }]),
+    ]);
   });
 
   it("sends nothing when a gain and a loss cancel out between messages", async () => {

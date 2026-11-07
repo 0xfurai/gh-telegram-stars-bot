@@ -68,6 +68,13 @@ describe("messages", () => {
     expect(messages.starNotifications([gain, loss])).toContain("\u22121 (⭐ 5)");
   });
 
+  it("refuses a change of 0: nothing is due then", () => {
+    expect(() => messages.starNotification("a/b", 0, 10)).toThrow(RangeError);
+    expect(() => messages.starNotifications([{ fullName: "a/b", change: 0, total: 1 }, { fullName: "c/d", change: 1, total: 2 }])).toThrow(
+      RangeError,
+    );
+  });
+
   it("formats the star notification", () => {
     expect(messages.starNotification("facebook/react", 1, 230000)).toBe(
       [

@@ -1,0 +1,15 @@
+-- Star losses are notified too (not only gains), with a cooldown so a count
+-- that keeps flapping (101, 100, 101, ...) can't send a message every run.
+--
+-- chat_repositories.last_notified_stars is the star count the chat was last
+-- told about. A notification is due when repositories.stars_count differs:
+--   * higher (a gain): at once;
+--   * lower (a loss): only when last_notified_at is over an hour old (or
+--     unknown), so flapping sends at most one gain and one loss an hour.
+-- Both columns are set together, only after a successful send (or a skip),
+-- so failed sends are retried by the next run. This supersedes the comment
+-- in 0001_initial_schema.sql, which predates loss notifications.
+--
+-- NULL: not notified since this column was added (copied from Supabase, or
+-- subscribed before): a loss is due at once.
+ALTER TABLE chat_repositories ADD COLUMN last_notified_at TEXT;

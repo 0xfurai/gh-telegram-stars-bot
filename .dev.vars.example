@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local `wrangler dev` and tests. Never commit .dev.vars.
+# Secrets are added here as they are declared in wrangler.jsonc (GSB-3).

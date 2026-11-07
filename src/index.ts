@@ -1,31 +1,9 @@
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+import { handleFetch } from "./http";
+import { handleScheduled } from "./star-check";
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
-}
-
-export function handleFetch(request: Request): Response {
-  const url = new URL(request.url);
-
-  if (request.method === "GET" && url.pathname === "/health") {
-    return json({ status: "ok" });
-  }
-
-  return json({ error: "Not found" }, 404);
-}
-
-// Placeholder until the star check is ported (GSB-9).
-export function handleScheduled(controller: ScheduledController): void {
-  console.log(
-    JSON.stringify({
-      message: "Star check placeholder ran",
-      cron: controller.cron,
-      scheduledTime: new Date(controller.scheduledTime).toISOString(),
-    }),
-  );
-}
-
+// Only the default export: every named export of the main module becomes a
+// Worker entrypoint.
 export default {
-  fetch: (request) => handleFetch(request),
-  scheduled: (controller) => handleScheduled(controller),
+  fetch: handleFetch,
+  scheduled: handleScheduled,
 } satisfies ExportedHandler<Env>;

@@ -3,6 +3,12 @@
   "name": "gh-telegram-stars-bot",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-19",
+  // Declared secrets. This list, not .dev.vars or .env, decides the secret
+  // names in the generated types, so they don't depend on local files.
+  // Filled in by GSB-3.
+  "secrets": {
+    "required": []
+  },
   "observability": {
     "enabled": true
   },

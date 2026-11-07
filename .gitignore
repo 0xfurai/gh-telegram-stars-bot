@@ -169,3 +169,5 @@ supabase/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+# Any env file (.env.legacy, .env.staging, ...): may hold secrets
+.env.*

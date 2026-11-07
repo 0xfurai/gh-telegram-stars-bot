@@ -6,13 +6,13 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "wrangler dev",
     "dev:scheduled": "wrangler dev --test-scheduled",
     "typegen": "wrangler types",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "typecheck": "tsc -p . && tsc -p test && tsc -p tsconfig.tools.json",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -20,6 +20,7 @@
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",
     "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
     "eslint": "10.13.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.0",
@@ -28,6 +29,7 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
-    "workerd@1.20261019.1": true
+    "workerd@1.20261019.1": true,
+    "fsevents": false
   }
 }

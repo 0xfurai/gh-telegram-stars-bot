@@ -1,8 +1,8 @@
 // I/O for the copy scripts: Supabase's REST API, GitHub's REST API, and D1
 // through wrangler. `fetch` and the command runner can be replaced in tests.
 import { chunk } from "../../src/chunk.ts";
-import { assertNever } from "../../src/result.ts";
 import { normalizeExport, type RawSupabaseExport } from "./normalize.ts";
+import { wranglerTargetArgs, type D1Target } from "./target.ts";
 import { SNAPSHOT_QUERIES, type D1Snapshot, type NodeIds, type SupabaseExport } from "./types.ts";
 
 const PAGE_SIZE = 1000;
@@ -15,10 +15,16 @@ export interface Supabase {
   fetch?: typeof fetch;
 }
 
+/**
+ * Supabase's newer secret keys (sb_secret_...) go in `apikey` only: they
+ * aren't JWTs, and the gateway turns them into one itself. The legacy
+ * service_role key is a JWT and goes in both headers.
+ */
 function supabaseHeaders(supabase: Supabase, extra: Record<string, string> = {}): Record<string, string> {
+  const key = supabase.serviceRoleKey;
   return {
-    apikey: supabase.serviceRoleKey,
-    authorization: `Bearer ${supabase.serviceRoleKey}`,
+    apikey: key,
+    ...(key.startsWith("sb_") ? {} : { authorization: `Bearer ${key}` }),
     "content-type": "application/json",
     ...extra,
   };
@@ -172,25 +178,6 @@ export async function lookUpNodeIds(github: GitHub, githubIds: readonly number[]
 
 /** Runs a command and returns its stdout. */
 export type RunCommand = (command: string, args: readonly string[]) => Promise<string>;
-
-/** Which D1 database: the wrangler environment, remote or local (a dry run). */
-export interface D1Target {
-  environment: "production" | "staging";
-  location: "remote" | "local";
-}
-
-/** wrangler's flags for a target. Production is wrangler.jsonc's top level, so it has no --env. */
-export function wranglerTargetArgs(target: D1Target): string[] {
-  const location = `--${target.location}`;
-  switch (target.environment) {
-    case "production":
-      return [location];
-    case "staging":
-      return [location, "--env", "staging"];
-    default:
-      return assertNever(target.environment);
-  }
-}
 
 /**
  * Reads a D1Snapshot with one `wrangler d1 execute --json` call running all

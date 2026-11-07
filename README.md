@@ -146,7 +146,7 @@ bunx wrangler d1 execute DB --remote --command \
 
 Existing users keep their subscriptions, don't need to send `/start` again, and get neither old stars nor a gap.
 
-All three scripts need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; the copy also needs `GITHUB_TOKEN`. Exports and generated SQL contain chat IDs: never commit them, and delete them when done.
+All three scripts need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (a secret key, `sb_secret_…`, or the legacy `service_role` key); the copy also needs `GITHUB_TOKEN`. Exports and generated SQL contain chat IDs: never commit them, and delete them when done.
 
 ```sh
 # 0. Before a full copy: a Supabase backup (pg_dump), kept outside the repo.
@@ -162,19 +162,27 @@ bun run migrate:copy -- --env=staging --mode=full        # production data into 
 bunx wrangler d1 execute DB --remote [--env staging] --file <file>
 
 # 3. Verify: compares every chat, subscription and repository; fails on any difference.
-#    --today is the day the copy ran, so a copy just before midnight UTC verifies after it.
+#    Use the --env the copy used. --today is the day the copy ran, so a copy just
+#    before midnight UTC verifies after it.
 bun run migrate:verify -- --env=production --mode=full --today=<day>   # or --mode=shadow; --local for a dry run
+bun run migrate:verify -- --env=staging --mode=full --today=<day>      # after the copy into staging
 
 # Rollback only: copy D1 back to Supabase (chats, subscriptions, star counts).
 bun run migrate:copy-back -- --env=production --dry-run   # see what would change
 bun run migrate:copy-back -- --env=production
 bun run migrate:verify -- --env=production --mode=shadow
+
+# Rehearsal of the rollback: staging's D1 into a local scratch Supabase only.
+# copy-back refuses --env=staging with a hosted SUPABASE_URL.
+SUPABASE_URL=http://127.0.0.1:54321 bun run migrate:copy-back -- --env=staging
 ```
 
 The two copy modes:
 
 * **`full`** makes D1 an exact copy of Supabase. Every subscription starts at Supabase's star count, and the last 90 days of star events become daily gains.
-* **`shadow`** mirrors chats and subscriptions, but keeps the star counts and gains the Worker tracks itself. New subscriptions start at D1's count. It reads D1's current subscriptions first and writes only what differs (`--local` reads the local D1).
+* **`shadow`** mirrors chats and subscriptions, but keeps the star counts and gains the Worker tracks itself. New subscriptions start at D1's count. It reads D1's current subscriptions first and writes only what differs.
+
+`--local` works on the local D1 instead of the remote one (a dry run), in every script and both modes; the commands the scripts print include it. Options take `--name=value` or `--name value`.
 
 During the final full copy and its verification, pause the Cron Trigger, so the Worker doesn't change star counts between the copy and the check.
 

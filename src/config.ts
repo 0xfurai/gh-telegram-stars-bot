@@ -4,13 +4,11 @@
 // Uses zod/mini: the same validation as full zod for about 4% of the bundle
 // size (17 KiB instead of 462 KiB minified).
 import * as z from "zod/mini";
+import { ENVIRONMENTS } from "./environment";
 import { err, ok, type Result } from "./result";
 
 export const NOTIFICATION_MODES = ["on", "dry-run", "off"] as const;
 export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
-
-export const ENVIRONMENTS = ["production", "staging"] as const;
-export type Environment = (typeof ENVIRONMENTS)[number];
 
 const TELEGRAM_TOKEN = /^(\d+):[A-Za-z0-9_-]{30,}$/;
 // Telegram allows 1-256 characters for secret_token; require a strong one.

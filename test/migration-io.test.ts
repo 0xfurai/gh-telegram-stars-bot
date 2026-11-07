@@ -5,7 +5,6 @@ import {
   lookUpNodeIds,
   readD1Snapshot,
   selectAll,
-  wranglerTargetArgs,
   upsert,
   type RunCommand,
 } from "../scripts/migration/io";
@@ -45,6 +44,16 @@ describe("Supabase", () => {
     expect(calls[0]?.url).toBe("https://sb.test/rest/v1/chats?select=id,is_active&order=id");
     expect(new Headers(calls[1]?.init?.headers).get("range")).toBe("1000-1999");
     expect(new Headers(calls[0]?.init?.headers).get("authorization")).toBe("Bearer key");
+  });
+
+  it("sends a newer secret key in apikey only: it isn't a JWT", async () => {
+    const { fetch, calls } = recordingFetch(() => Response.json([]));
+
+    await selectAll({ url: "https://sb.test", serviceRoleKey: "sb_secret_abc", fetch }, "chats", { columns: "id", order: "id" });
+
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get("apikey")).toBe("sb_secret_abc");
+    expect(headers.has("authorization")).toBe(false);
   });
 
   it("fails loudly on an error response", async () => {
@@ -190,11 +199,5 @@ describe("readD1Snapshot", () => {
     await expect(readD1Snapshot(run, { environment: "production", location: "remote" })).rejects.toThrow(
       "Reading D1 returned 1 results for 4 queries",
     );
-  });
-
-  it("targets production as wrangler.jsonc's top level, and staging with --env", () => {
-    expect(wranglerTargetArgs({ environment: "production", location: "remote" })).toEqual(["--remote"]);
-    expect(wranglerTargetArgs({ environment: "production", location: "local" })).toEqual(["--local"]);
-    expect(wranglerTargetArgs({ environment: "staging", location: "remote" })).toEqual(["--remote", "--env", "staging"]);
   });
 });

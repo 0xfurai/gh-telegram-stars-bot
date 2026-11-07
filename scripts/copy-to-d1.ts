@@ -20,7 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertNever } from "../src/result.ts";
 import { copyMode, d1Target, option, requiredEnv, runCommand, runMain, starEventsSince, today } from "./migration/cli.ts";
-import { exportSupabase, lookUpNodeIds, readD1Snapshot, wranglerTargetArgs, type D1Target } from "./migration/io.ts";
+import { exportSupabase, lookUpNodeIds, readD1Snapshot } from "./migration/io.ts";
+import { scriptTargetArgs, wranglerTargetArgs, type D1Target } from "./migration/target.ts";
 import { buildD1Sql, type CopyOptions } from "./migration/to-d1.ts";
 import type { CopyMode } from "./migration/types.ts";
 
@@ -65,9 +66,8 @@ async function main(): Promise<void> {
 
   await writeFile(out, sql.value, { mode: 0o600 });
   console.log(`\nWrote ${out}. Next:`);
-  const local = target.location === "local" ? " --local" : "";
   console.log(`  bunx wrangler d1 execute DB ${wranglerTargetArgs(target).join(" ")} --file ${out}`);
-  console.log(`  bun run migrate:verify -- --env=${target.environment} --mode=${mode} --today=${day}${local}`);
+  console.log(`  bun run migrate:verify -- ${scriptTargetArgs(target).join(" ")} --mode=${mode} --today=${day}`);
   console.log(`  rm ${out}   # it contains chat IDs`);
 }
 

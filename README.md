@@ -38,6 +38,20 @@ Use `bun run test`, not `bun test`: `bun test` starts Bun's own test runner inst
 * Secret names are declared in `wrangler.jsonc` under `secrets.required`. Generated types come from that list, not from your local files, so CI and your machine always agree.
 * Wrangler falls back to a root `.env` when `.dev.vars` is missing. Keep a `.dev.vars` file, and don't keep a root `.env` in this repo.
 
+### Database (D1)
+
+The schema lives in `migrations/`, one numbered SQL file per change. Never edit a migration that has been applied anywhere; add a new one.
+
+```sh
+bunx wrangler d1 migrations create DB <name>   # new empty migration file
+bunx wrangler d1 migrations apply DB --local   # apply to the local dev database
+bunx wrangler d1 execute DB --local --command "SELECT * FROM chats"
+```
+
+Tests apply the same migrations to a fresh database (`test/apply-migrations.ts`).
+
+D1 counts every written row, index entries included, and the free plan allows 100k rows written per day. `test/schema.test.ts` fixes the list of indexes and checks that the writes the star check repeats cost one row each. Add an index only when a query needs it.
+
 ### Dependency install scripts
 
 Bun only runs install scripts for packages listed in `trustedDependencies` in `package.json`: `esbuild` and `workerd`, which download native binaries. After adding a dependency, check that nothing else needs its scripts:

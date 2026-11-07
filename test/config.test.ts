@@ -29,6 +29,7 @@ describe("parseConfig", () => {
         maxReposPerChat: 50,
         allowedChatIds: null,
         adminChatId: null,
+        environment: "production",
       },
     });
   });
@@ -66,6 +67,32 @@ describe("parseConfig", () => {
     const result = parse({ ALLOWED_CHAT_IDS: " 42, -1001234567890 ,," });
 
     expect(result.ok && [...(result.value.allowedChatIds ?? [])]).toEqual([42, -1001234567890]);
+  });
+
+  it("requires ALLOWED_CHAT_IDS in staging, so the test bot can't message real users", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "staging" }))).toEqual(["ALLOWED_CHAT_IDS is required in staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: " " }))).toEqual([
+      "ALLOWED_CHAT_IDS is required in staging",
+    ]);
+    expect(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42" })).toMatchObject({
+      ok: true,
+      value: { environment: "staging", allowedChatIds: new Set([42]) },
+    });
+  });
+
+  it("rejects a missing or unknown ENVIRONMENT, instead of falling back to production", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "prod" }))).toEqual(["ENVIRONMENT must be production or staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: undefined }))).toEqual(["ENVIRONMENT is required: production or staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: " " }))).toEqual(["ENVIRONMENT is required: production or staging"]);
+  });
+
+  it("requires the staging admin chat to be in the allowlist", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42", ADMIN_CHAT_ID: "7" }))).toEqual([
+      "ADMIN_CHAT_ID must be in ALLOWED_CHAT_IDS in staging",
+    ]);
+    expect(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42,7", ADMIN_CHAT_ID: "7" }).ok).toBe(true);
+    // Production has no allowlist to check against.
+    expect(parse({ ADMIN_CHAT_ID: "7" }).ok).toBe(true);
   });
 
   it("treats an empty ALLOWED_CHAT_IDS as no restriction", () => {

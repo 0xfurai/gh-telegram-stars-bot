@@ -126,6 +126,7 @@ describe("alertAdmin", () => {
     expect(telegram.calls).toHaveLength(2);
     expect(telegram.calls[0]?.body).toMatchObject({ chat_id: 42, parse_mode: "HTML" });
     expect(String(telegram.calls[0]?.body.text)).toContain("boom &lt;1&gt;");
+    expect(String(telegram.calls[0]?.body.text)).toContain("Star check problem (production)");
   });
 
   it("gives the hour back when the alert isn't delivered, so the next one can go out", async () => {

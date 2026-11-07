@@ -1,0 +1,37 @@
+name: Check
+
+# Typecheck, lint and test. Used by ci.yml and before every production deploy.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Every job runs on the self-hosted nexus-runner, pull requests from forks
+    # too. Its runners are ephemeral (ARC): each job gets a fresh pod, so a
+    # job can't leave anything behind for a later one, such as a deploy.
+    # A pull request can change the workflow files, so before approving a run
+    # from an outside contributor, check that it doesn't touch .github/. The
+    # repo requires approval for runs from all outside contributors.
+    runs-on: nexus-runner
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave the GitHub token in .git/config while package install
+          # scripts run.
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Generated Worker types are up to date
+        run: bun run typegen:check
+
+      - run: bun run typecheck
+
+      - run: bun run lint
+
+      # `bun run test` runs Vitest. `bun test` would run Bun's own test runner.
+      - run: bun run test

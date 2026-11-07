@@ -1,6 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
+  // The top level is production; "env.staging" below overrides it for staging.
+  // Deploys run from GitHub Actions (.github/workflows), never from a laptop.
   "name": "gh-telegram-stars-bot",
+  "account_id": "e088971b027940145fda90e7f1ebb951",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-19",
   // Every setting is validated at startup (src/config.ts); with an invalid one
@@ -21,7 +24,12 @@
   // Plain settings with defaults. Change them here (or per environment in this
   // file), never in the dashboard: `wrangler deploy` removes plain settings
   // that aren't in this file.
+  //
+  // Chat IDs are personal data and this repo is public: the deploy workflows
+  // pass ALLOWED_CHAT_IDS and ADMIN_CHAT_ID with `--var`, from the GitHub
+  // environment's variables. The values here are the defaults without them.
   "vars": {
+    "ENVIRONMENT": "production",
     "MAX_REPOS_PER_CHAT": "50",
     // Comma-separated chat IDs that may use the bot; empty means everyone.
     "ALLOWED_CHAT_IDS": "",
@@ -39,7 +47,34 @@
     {
       "binding": "DB",
       "database_name": "gh-telegram-stars-bot",
+      "database_id": "05205bf6-da5f-4f3a-acbe-e309524fbb9f",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "env": {
+    // A test bot (never the production one), its own Worker and D1. Staging
+    // holds a copy of production data during the rehearsal, so it refuses to
+    // start without ALLOWED_CHAT_IDS (src/config.ts).
+    "staging": {
+      "name": "gh-telegram-stars-bot-staging",
+      // Not inherited from the top level; keep the two lists the same.
+      "secrets": {
+        "required": ["TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN", "WEBHOOK_SECRET", "NOTIFICATIONS", "BOT_INFO"]
+      },
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "MAX_REPOS_PER_CHAT": "50",
+        "ALLOWED_CHAT_IDS": "",
+        "ADMIN_CHAT_ID": ""
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "gh-telegram-stars-bot-staging",
+          "database_id": "378b66e0-0879-43a6-9645-572a5242b5fc",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
 }

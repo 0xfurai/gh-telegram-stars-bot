@@ -1,0 +1,22 @@
+name: Deploy to production
+
+# Run by hand (Actions → Deploy to production → Run workflow, on main). The
+# "production" environment requires an approval before the job starts.
+# To undo a bad deploy: `bunx wrangler rollback` (see the README).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/check.yml
+
+  deploy:
+    needs: check
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+    secrets: inherit

@@ -9,6 +9,9 @@ import { err, ok, type Result } from "./result";
 export const NOTIFICATION_MODES = ["on", "dry-run", "off"] as const;
 export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
 
+export const ENVIRONMENTS = ["production", "staging"] as const;
+export type Environment = (typeof ENVIRONMENTS)[number];
+
 const TELEGRAM_TOKEN = /^(\d+):[A-Za-z0-9_-]{30,}$/;
 // Telegram allows 1-256 characters for secret_token; require a strong one.
 const WEBHOOK_SECRET = /^[A-Za-z0-9_-]{32,256}$/;
@@ -99,6 +102,11 @@ const settingsShape = {
   MAX_REPOS_PER_CHAT: z.pipe(z.optional(z.string()), z.transform(parseMaxRepos)),
   ALLOWED_CHAT_IDS: z.pipe(z.optional(z.string()), z.transform(parseChatIdList)),
   ADMIN_CHAT_ID: z.pipe(z.optional(z.string()), z.transform(parseOptionalChatId)),
+  // No default: the staging guard below must fail closed, never fall back to production.
+  ENVIRONMENT: z.enum(ENVIRONMENTS, {
+    error: (issue) =>
+      issue.input === undefined ? "is required: production or staging" : "must be production or staging",
+  }),
 };
 
 type Settings = z.output<z.ZodMiniObject<typeof settingsShape>>;
@@ -109,6 +117,20 @@ function checkBotMatchesToken(settings: Settings, ctx: z.core.$RefinementCtx<Set
   const tokenBotId = TELEGRAM_TOKEN.exec(settings.TELEGRAM_BOT_TOKEN)?.[1];
   if (tokenBotId !== String(settings.BOT_INFO.id)) {
     ctx.addIssue({ code: "custom", path: ["BOT_INFO"], message: "is for a different bot than TELEGRAM_BOT_TOKEN" });
+  }
+}
+
+// Staging holds a copy of production data during the rehearsal: its bot must
+// never message anyone outside the allowlist, admin alerts included.
+function checkStagingIsRestricted(settings: Settings, ctx: z.core.$RefinementCtx<Settings>): void {
+  if (settings.ENVIRONMENT !== "staging") {
+    return;
+  }
+  const allowed = settings.ALLOWED_CHAT_IDS;
+  if (allowed === null) {
+    ctx.addIssue({ code: "custom", path: ["ALLOWED_CHAT_IDS"], message: "is required in staging" });
+  } else if (settings.ADMIN_CHAT_ID !== null && !allowed.has(settings.ADMIN_CHAT_ID)) {
+    ctx.addIssue({ code: "custom", path: ["ADMIN_CHAT_ID"], message: "must be in ALLOWED_CHAT_IDS in staging" });
   }
 }
 
@@ -125,11 +147,13 @@ function toAppConfig(settings: Settings) {
     allowedChatIds: settings.ALLOWED_CHAT_IDS,
     /** Where failed-run alerts go. null turns the alerts off. */
     adminChatId: settings.ADMIN_CHAT_ID,
+    /** Shown in admin alerts, so a staging alert isn't mistaken for production. */
+    environment: settings.ENVIRONMENT,
   };
 }
 
 const configSchema = z.pipe(
-  z.object(settingsShape).check(z.superRefine(checkBotMatchesToken)),
+  z.object(settingsShape).check(z.superRefine(checkBotMatchesToken), z.superRefine(checkStagingIsRestricted)),
   z.transform(toAppConfig),
 );
 

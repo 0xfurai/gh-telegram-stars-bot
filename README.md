@@ -124,6 +124,24 @@ Every run logs a `"Star check finished"` summary.
 
 Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
 
+## Monitoring
+
+* **Run log.** Every star check run is saved in `star_check_runs` (kept 7 days), with its summary as JSON.
+* **Alerts** go to `ADMIN_CHAT_ID`, at most once an hour, when something needs a person:
+  * **At once:** GitHub rejected the token, or answered something unexpected (likely a bug). The Cron invocation fails too, so Cloudflare shows it.
+  * **Only when star checks go stale** (no successful run in 15 minutes): temporary problems such as rate limits, timeouts, or GitHub or D1 outages, and crashes. These usually heal by themselves.
+  * A run that hit a temporary GitHub error after making some progress counts as successful.
+  * Failed Telegram sends don't count: they're retried.
+  * A crash is rethrown with its original error, so Cloudflare's logs show the stack.
+  * If the alert can't be throttled (D1 down), it goes out anyway. If Telegram refuses it, the next failing run tries again.
+* **`GET /health/star-check`** answers 503 when the last successful run is more than 15 minutes old, or there hasn't been one yet. Point an uptime monitor (UptimeRobot, Better Stack) at it, checking every 5 minutes.
+* **`GET /health`** only checks that the Worker runs with valid settings. `telegram:setup` uses it.
+
+```sh
+bunx wrangler d1 execute DB --remote --command \
+  "SELECT scheduled_at, ok, summary FROM star_check_runs ORDER BY id DESC LIMIT 5"
+```
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

@@ -7,6 +7,7 @@ import * as z from "zod/mini";
 import { chunk } from "./chunk";
 import type { RepositoryInfo, RepositoryToCheck, StarCheckUpdate } from "./db";
 import { assertNever, err, ok, type Result } from "./result";
+import { errorMessage } from "./errors";
 
 const GRAPHQL_URL = "https://api.github.com/graphql";
 // GitHub requires a User-Agent. A generic name, no personal contact details.
@@ -139,7 +140,7 @@ function fetchFailure(error: unknown): GitHubError {
   if (error instanceof DOMException && error.name === "TimeoutError") {
     return { kind: "timeout" };
   }
-  return { kind: "network", message: error instanceof Error ? error.message : String(error) };
+  return { kind: "network", message: errorMessage(error) };
 }
 
 async function postGraphql(

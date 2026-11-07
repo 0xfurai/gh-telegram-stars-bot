@@ -1,6 +1,8 @@
 import { webhookCallback } from "grammy";
 import { createBot, type BotDeps } from "./bot";
 import type { AppConfig } from "./config";
+import { healthStatusCode, starCheckHealth } from "./monitoring";
+import { errorMessage } from "./errors";
 
 export interface RequestContext extends BotDeps {
   config: AppConfig;
@@ -66,15 +68,27 @@ async function handleWebhook(request: Request, context: RequestContext): Promise
     console.error(
       JSON.stringify({
         message: "Webhook request failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
     );
     return Response.json({ ok: false });
   }
 }
 
+/**
+ * For an uptime monitor: 503 when the last successful star check is more
+ * than 15 minutes old. Reads D1 only; never calls GitHub or Telegram.
+ */
+async function handleStarCheckHealth(_request: Request, context: RequestContext): Promise<Response> {
+  const now = context.now?.().getTime() ?? Date.now();
+  const health = await starCheckHealth(context.db, now);
+  return Response.json(health, { status: healthStatusCode(health) });
+}
+
 const ROUTES: Partial<Record<string, Methods>> = {
+  // Liveness: the Worker runs and its settings are valid (telegram:setup checks this).
   "/health": { GET: () => Response.json({ status: "ok" }) },
+  "/health/star-check": { GET: handleStarCheckHealth },
   "/webhook": { POST: handleWebhook },
 };
 

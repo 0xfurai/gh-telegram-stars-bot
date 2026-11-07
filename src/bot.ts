@@ -7,6 +7,7 @@ import { ensureChat, markChatReachable, migrateChat, setChatActive } from "./db"
 import { assertNever } from "./result";
 import * as messages from "./messages";
 import { replyHtml } from "./telegram";
+import { errorMessage } from "./errors";
 
 export type { CommandHandler } from "./commands";
 
@@ -84,7 +85,7 @@ async function trackChat(db: D1Database, chatId: number): Promise<void> {
     await ensureChat(db, chatId);
   } catch (error) {
     console.error(
-      JSON.stringify({ message: "Chat not tracked", chatId, error: error instanceof Error ? error.message : String(error) }),
+      JSON.stringify({ message: "Chat not tracked", chatId, error: errorMessage(error) }),
     );
   }
 }

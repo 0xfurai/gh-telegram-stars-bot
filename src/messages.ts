@@ -4,6 +4,7 @@
 // or link(). The old app used legacy Markdown without escaping, so a "_" or
 // "*" in a repository name made Telegram reject the message, and those
 // notifications were never delivered.
+import { chunk } from "./chunk";
 import { COMMANDS } from "./command-list";
 import { repositoryUrl, type Repository, type Stats } from "./db";
 
@@ -130,10 +131,7 @@ export function subscriptionList(repos: readonly Repository[], maxReposPerChat: 
     (repo, index) =>
       `${index + 1}. ${repositoryLink(repo.fullName)}${repo.isArchived ? " 📦" : ""} - ⭐ ${number(repo.starsCount)}`,
   );
-  const pages: string[][] = [];
-  for (let i = 0; i < lines.length; i += MAX_LIST_ENTRIES_PER_MESSAGE) {
-    pages.push(lines.slice(i, i + MAX_LIST_ENTRIES_PER_MESSAGE));
-  }
+  const pages = chunk(lines, MAX_LIST_ENTRIES_PER_MESSAGE);
   return pages.map((page, index) =>
     [
       ...(index === 0 ? [`🌟 <b>Your subscriptions</b> (${repos.length}/${maxReposPerChat})`, ""] : []),

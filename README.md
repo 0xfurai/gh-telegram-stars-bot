@@ -107,7 +107,20 @@ A Cron Trigger runs `src/star-check.ts` every 5 minutes:
 | `dry-run` | Logs each notification (`"Notification skipped"`) and marks it sent. Used for the shadow run. |
 | `off` | Sends and marks nothing; everything stays due. The emergency stop: `wrangler secret put NOTIFICATIONS`, no deploy. |
 
-Each run stays under the free plan's ~50 subrequests: at most 10 GitHub requests and 20 messages, and the rest waits for the next run. A Telegram rate limit or outage stops sending for that run. The first run after midnight UTC deletes star gains older than 90 days. Every run logs a `"Star check finished"` summary.
+Limits and safety:
+
+* **Subrequest budget.** Each run stays within 45 subrequests (the free plan allows about 50; fetch calls and D1 queries both count).
+  * GitHub gets up to 10 requests (1,000 repositories).
+  * Messages get what's left, at most 20, at 2 subrequests each: the send, then one D1 batch marking it sent.
+  * Everything else waits for the next run. The summary's `subrequests` field shows what a run used.
+* **Run lock.** Two runs never overlap. A run that finds the lock held skips. A crashed run's lock expires after 10 minutes.
+* **Telegram failures.**
+  * A rate limit or outage stops sending for that run.
+  * A message Telegram rejects (likely a bug on our side) is logged and dropped.
+  * If marking a sent message fails, sending stops, and the possible duplicate is logged.
+* **Retention.** The first run after midnight UTC deletes star gains older than 90 days.
+
+Every run logs a `"Star check finished"` summary.
 
 Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
 

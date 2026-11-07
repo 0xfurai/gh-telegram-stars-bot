@@ -1,8 +1,15 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getStarCheckCursor } from "../src/db";
+import { acquireStarCheckLock, getStarCheckCursor, releaseStarCheckLock } from "../src/db";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "../src/messages";
-import { afterSendFailure, groupDeliveries, isPruneRun, runStarCheck, type StarCheckLimits } from "../src/star-check";
+import {
+  afterSendFailure,
+  groupDeliveries,
+  isPruneRun,
+  runStarCheck,
+  SUBREQUEST_BUDGET,
+  type StarCheckLimits,
+} from "../src/star-check";
 import type { SendError } from "../src/telegram";
 import { testConfig } from "./telegram";
 
@@ -38,7 +45,7 @@ const githubFetch: typeof fetch = (_input, init) => {
   );
 };
 
-type TelegramReply = "ok" | "blocked" | "rate-limited" | "down";
+type TelegramReply = "ok" | "blocked" | "too-long" | "rate-limited" | "down";
 
 interface Sent {
   chatId: number;
@@ -60,6 +67,8 @@ function fakeTelegram(replyFor: (chatId: number) => TelegramReply = () => "ok") 
       },
       blocked: () =>
         Response.json({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }, { status: 403 }),
+      "too-long": () =>
+        Response.json({ ok: false, error_code: 400, description: "Bad Request: message is too long" }, { status: 400 }),
       "rate-limited": () =>
         Response.json(
           { ok: false, error_code: 429, description: "Too Many Requests", parameters: { retry_after: 3 } },
@@ -105,11 +114,17 @@ function run(options: {
   settings?: Record<string, string>;
   limits?: Partial<StarCheckLimits>;
   at?: number;
+  database?: D1Database;
 } = {}) {
   return runStarCheck(
     { scheduledTime: options.at ?? NOON },
     testConfig({ NOTIFICATIONS: "on", ...options.settings }),
-    { db, githubFetch, telegramFetch: (options.telegram ?? fakeTelegram()).fetch, limits: options.limits },
+    {
+      db: options.database ?? db,
+      githubFetch,
+      telegramFetch: (options.telegram ?? fakeTelegram()).fetch,
+      limits: options.limits,
+    },
   );
 }
 
@@ -120,7 +135,7 @@ beforeEach(async () => {
     db.prepare("DELETE FROM chat_repositories"),
     db.prepare("DELETE FROM repositories"),
     db.prepare("DELETE FROM chats"),
-    db.prepare("UPDATE star_check_state SET cursor = 0"),
+    db.prepare("UPDATE star_check_state SET cursor = 0, locked_until = NULL"),
   ]);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -271,6 +286,118 @@ describe("star check", () => {
 
     expect(summary.repositoriesChecked).toBe(100);
     expect(await getStarCheckCursor(db)).toBe(100);
+  });
+});
+
+describe("run safety", () => {
+  it("skips the run when another run holds the lock", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    githubStars.set(1, 105);
+    await acquireStarCheckLock(db, Date.now(), Date.now() + 600_000);
+    const telegram = fakeTelegram();
+
+    const summary = await run({ telegram });
+
+    expect(summary.skipped).toBe("another-run-in-progress");
+    expect(telegram.attempts).toEqual([]);
+    expect(await lastNotified(10, 1)).toBe(100);
+    await releaseStarCheckLock(db);
+  });
+
+  it("releases the lock after a run, even a failed one", async () => {
+    await run();
+    expect(await acquireStarCheckLock(db, Date.now(), Date.now() + 1000)).toBe(true);
+    await releaseStarCheckLock(db);
+
+    const broken = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return () => Promise.reject(new Error("D1 down"));
+        }
+        const value: unknown = Reflect.get(target, prop);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    await expect(run({ database: broken })).rejects.toThrow("D1 down");
+    expect(await acquireStarCheckLock(db, Date.now(), Date.now() + 1000)).toBe(true);
+    await releaseStarCheckLock(db);
+  });
+
+  it("stays within the subrequest budget with 1,000 repositories", async () => {
+    for (let id = 1; id <= 1000; id++) {
+      githubStars.set(id, 11);
+    }
+    await db.batch(
+      Array.from({ length: 1000 }, (_, i) =>
+        db
+          .prepare("INSERT INTO repositories (id, github_node_id, full_name, stars_count) VALUES (?, ?, ?, 10)")
+          .bind(i + 1, `R_${i + 1}`, `owner/repo-${i + 1}`),
+      ),
+    );
+    // Chat 99 follows every repository and is already up to date, so all
+    // 1,000 are checked; 30 other chats are due one notification each.
+    await db.prepare("INSERT INTO chats (id) VALUES (99)").run();
+    await db.batch(
+      Array.from({ length: 1000 }, (_, i) =>
+        db
+          .prepare("INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars) VALUES (99, ?, 11)")
+          .bind(i + 1),
+      ),
+    );
+    await db.batch(
+      Array.from({ length: 30 }, (_, i) => [
+        db.prepare("INSERT INTO chats (id) VALUES (?)").bind(100 + i),
+        db
+          .prepare("INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars) VALUES (?, ?, 10)")
+          .bind(100 + i, i + 1),
+      ]).flat(),
+    );
+    const telegram = fakeTelegram();
+
+    const summary = await run({ telegram });
+
+    expect(summary.githubRequests).toBe(10);
+    expect(summary.subrequests).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
+    expect(telegram.sent.length).toBeLessThan(20);
+    expect(summary.notificationsLeft).toBe(30 - telegram.sent.length);
+  });
+
+  it("drops a message Telegram rejects, so it can't take a slot every run", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    githubStars.set(1, 105);
+
+    const summary = await run({ telegram: fakeTelegram(() => "too-long") });
+
+    expect(summary.sendErrors).toEqual(["rejected"]);
+    expect(summary.notificationsSkipped).toBe(1);
+    expect(await lastNotified(10, 1)).toBe(105);
+  });
+
+  it("stops sending when marking a sent message fails, and logs the possible duplicate", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    await subscribe(20, 1);
+    githubStars.set(1, 105);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const telegram = fakeTelegram();
+    // D1 batches fail once the first message is out.
+    const flaky = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch" && telegram.sent.length > 0) {
+          return () => Promise.reject(new Error("D1 down"));
+        }
+        const value: unknown = Reflect.get(target, prop);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    const summary = await run({ telegram, database: flaky });
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(summary.notificationsLeft).toBe(1);
+    expect(error.mock.calls.map((call) => String(call[0])).join(" ")).toContain("may be sent again");
   });
 });
 

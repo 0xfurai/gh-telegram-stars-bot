@@ -37,7 +37,7 @@ function repo(id: number, overrides: Partial<RepositoryInfo> = {}): RepositoryIn
 }
 
 function update(id: number, starsCount: number, overrides: Partial<StarCheckUpdate> = {}): StarCheckUpdate {
-  return { id, fullName: `owner/repo-${id}`, starsCount, isArchived: false, ...overrides };
+  return { id, fullName: `owner/repo-${id}`, description: `Repo ${id}`, starsCount, isArchived: false, ...overrides };
 }
 
 async function lastNotified(chatId: number, repositoryId: number): Promise<number | undefined> {

@@ -1,6 +1,6 @@
 import { Bot, type BotError, type Context, type MiddlewareFn } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
-import { COMMANDS, type CommandName } from "./command-list";
+import { ADMIN_COMMANDS, COMMANDS, type CommandName } from "./command-list";
 import { createCommandHandlers, handlePlainText, type CommandHandler } from "./commands";
 import type { AppConfig } from "./config";
 import { ensureChat, markChatReachable, migrateChat, setChatActive } from "./db";
@@ -53,6 +53,28 @@ function isCommandName(name: string): name is CommandName {
   return COMMANDS.some((command) => command.command === name);
 }
 
+function isAdminCommand(name: CommandName): boolean {
+  return ADMIN_COMMANDS.some((command) => command.command === name);
+}
+
+/**
+ * The handler for a command in this chat, or null for an unknown command.
+ * Admin commands count as unknown outside ADMIN_CHAT_ID, so nothing hints
+ * that they exist; with no admin chat, they're unknown everywhere.
+ */
+function handlerFor(
+  name: string,
+  chatId: number | undefined,
+  handlers: Record<CommandName, CommandHandler>,
+  adminChatId: number | null,
+): CommandHandler | null {
+  if (!isCommandName(name)) {
+    return null;
+  }
+  const allowed = !isAdminCommand(name) || (adminChatId !== null && chatId === adminChatId);
+  return allowed ? handlers[name] : null;
+}
+
 function startsWithCommand(entities: MessageEntity[] | undefined): boolean {
   return entities?.some((e) => e.type === "bot_command" && e.offset === 0) ?? false;
 }
@@ -63,11 +85,16 @@ type Action = () => Promise<void>;
  * What a message asks the bot to do, or null when it's not for the bot:
  * group chatter, or a command for another bot.
  */
-function actionFor(ctx: Context, text: string, handlers: Record<CommandName, CommandHandler>): Action | null {
+function actionFor(
+  ctx: Context,
+  text: string,
+  handlers: Record<CommandName, CommandHandler>,
+  adminChatId: number | null,
+): Action | null {
   const message = ctx.message;
   const command = message ? parseCommand(message, ctx.me.username) : null;
   if (command !== null) {
-    const handler = isCommandName(command.name) ? handlers[command.name] : null;
+    const handler = handlerFor(command.name, ctx.chat?.id, handlers, adminChatId);
     return handler ? () => handler(ctx, command.args) : () => replyHtml(ctx, messages.unknownCommand());
   }
   if (startsWithCommand(message?.entities) || ctx.chat?.type !== "private") {
@@ -90,10 +117,14 @@ async function trackChat(db: D1Database, chatId: number): Promise<void> {
   }
 }
 
-function dispatcher(db: D1Database, handlers: Record<CommandName, CommandHandler>): MiddlewareFn {
+function dispatcher(
+  db: D1Database,
+  handlers: Record<CommandName, CommandHandler>,
+  adminChatId: number | null,
+): MiddlewareFn {
   return async (ctx) => {
     const text = ctx.message?.text;
-    const action = text === undefined ? null : actionFor(ctx, text, handlers);
+    const action = text === undefined ? null : actionFor(ctx, text, handlers, adminChatId);
     if (action === null || ctx.chat === undefined) {
       return;
     }
@@ -184,6 +215,6 @@ export function createBot(config: AppConfig, deps: BotDeps): Bot {
   guarded.on("message:migrate_to_chat_id", (ctx) =>
     migrateChat(deps.db, ctx.chat.id, ctx.message.migrate_to_chat_id),
   );
-  guarded.on("message:text", dispatcher(deps.db, handlers));
+  guarded.on("message:text", dispatcher(deps.db, handlers, config.adminChatId));
   return bot;
 }

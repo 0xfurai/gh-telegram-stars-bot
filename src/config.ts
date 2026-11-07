@@ -143,7 +143,11 @@ function toAppConfig(settings: Settings) {
     maxReposPerChat: settings.MAX_REPOS_PER_CHAT,
     /** null means every chat may use the bot. */
     allowedChatIds: settings.ALLOWED_CHAT_IDS,
-    /** Where failed-run alerts go. null turns the alerts off. */
+    /**
+     * Where failed-run alerts go, and the only chat where admin commands
+     * (/stats) work. null turns both off. Everyone in this chat gets both, so
+     * use a private chat or a group of people trusted with the bot's totals.
+     */
     adminChatId: settings.ADMIN_CHAT_ID,
     /** Shown in admin alerts, so a staging alert isn't mistaken for production. */
     environment: settings.ENVIRONMENT,

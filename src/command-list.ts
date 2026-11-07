@@ -11,9 +11,11 @@ export const PUBLIC_COMMANDS = [
 ] as const;
 
 /**
- * Only for ADMIN_CHAT_ID: elsewhere they answer like an unknown command, and
- * they're in the admin chat's menu only. /stats shows totals for the whole
- * bot (chats, subscriptions), which aren't everyone's business.
+ * Only for ADMIN_CHAT_ID: the dispatcher (src/bot.ts) answers them like an
+ * unknown command anywhere else. They're never in the command menu, which is
+ * the same for every chat; /help lists them in the admin chat. /stats shows
+ * totals for the whole bot (chats, subscriptions), which aren't everyone's
+ * business.
  */
 export const ADMIN_COMMANDS = [{ command: "stats", description: "Show bot statistics (admin only)" }] as const;
 

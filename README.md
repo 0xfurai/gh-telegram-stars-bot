@@ -84,7 +84,7 @@ Use the same token and secret as the Worker's secrets. The script:
 2. Refuses to continue unless the Worker's `/health` answers 200. A 503 means a setting is missing or invalid: store it and run the script again.
 3. Sets the webhook, keeping pending updates so messages sent during a switch reach the Worker, and registers the command menu.
 
-`/stats` (totals for the whole bot) only answers in `ADMIN_CHAT_ID`; anywhere else it's an unknown command. Pass the same `ADMIN_CHAT_ID` to `telegram:setup` to list it in that chat's menu only.
+`/stats` (totals for the whole bot) only answers in `ADMIN_CHAT_ID`; anywhere else it's an unknown command. It's not in the command menu; `/help` lists it in the admin chat. Everyone in the admin chat can use it and gets the alerts, so make it a private chat or a group of people you trust with those numbers.
 
 Every webhook request gets 200 once the secret checks out, so Telegram never redelivers an update:
 

@@ -142,7 +142,7 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
 
   return {
     start: (ctx) => replyHtml(ctx, messages.welcome()),
-    help: (ctx) => replyHtml(ctx, messages.help(max)),
+    help: (ctx) => replyHtml(ctx, messages.help(max, chatIdOf(ctx) === deps.config.adminChatId)),
     add,
     list: async (ctx) => {
       for (const page of messages.subscriptionList(await listSubscriptions(deps.db, chatIdOf(ctx)), max)) {
@@ -150,12 +150,8 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
       }
     },
     remove,
-    // Admin only (see ADMIN_COMMANDS); elsewhere it's an unknown command, so
-    // nothing hints that it exists.
+    // Admin only: the dispatcher never calls it outside ADMIN_CHAT_ID.
     stats: async (ctx) => {
-      if (chatIdOf(ctx) !== deps.config.adminChatId) {
-        return replyHtml(ctx, messages.unknownCommand());
-      }
       const since = utcDay(new Date(now().getTime() - (STATS_DAYS - 1) * DAY_MS));
       return replyHtml(ctx, messages.stats(await getStats(deps.db, since), STATS_DAYS));
     },

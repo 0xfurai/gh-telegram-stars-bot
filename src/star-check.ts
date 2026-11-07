@@ -262,12 +262,20 @@ async function onSendFailure(
     );
     return "stop-sending";
   }
-  if (policy.notification === "drop") {
-    context.summary.notificationsSkipped += delivery.items.length;
-    const marked = await markSent(context, delivery);
-    return marked === "stop-sending" ? marked : policy.sending;
+  switch (policy.notification) {
+    case "retry":
+      return policy.sending;
+    case "drop":
+      context.summary.notificationsSkipped += delivery.items.length;
+      return worstOf(await markSent(context, delivery), policy.sending);
+    default:
+      return assertNever(policy.notification);
   }
-  return policy.sending;
+}
+
+/** Stop wins: if either step says stop, the run stops sending. */
+function worstOf(a: Next, b: Next): Next {
+  return a === "stop-sending" || b === "stop-sending" ? "stop-sending" : "next-delivery";
 }
 
 async function deliver(context: SendContext, delivery: Delivery): Promise<Next> {

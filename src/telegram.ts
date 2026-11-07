@@ -21,23 +21,26 @@ export type SendError =
   /** 5xx or a network failure: try again later. */
   | { kind: "unavailable"; message: string };
 
+function fromBadRequest(code: number, description: string, newChatId: number | undefined): SendError {
+  // A group upgraded to a supergroup: Telegram's 400 carries the new ID.
+  if (newChatId !== undefined) {
+    return { kind: "chat-migrated", newChatId };
+  }
+  return /chat not found/i.test(description) ? { kind: "chat-not-found" } : { kind: "rejected", code, description };
+}
+
 function fromApiError(error: GrammyError): SendError {
-  if (error.error_code === 403) {
-    return { kind: "blocked", description: error.description };
+  const { error_code: code, description, parameters } = error;
+  switch (code) {
+    case 403:
+      return { kind: "blocked", description };
+    case 429:
+      return { kind: "rate-limited", retryAfter: parameters.retry_after ?? 1 };
+    case 400:
+      return fromBadRequest(code, description, parameters.migrate_to_chat_id);
+    default:
+      return code >= 500 ? { kind: "unavailable", message: description } : { kind: "rejected", code, description };
   }
-  if (error.error_code === 429) {
-    return { kind: "rate-limited", retryAfter: error.parameters.retry_after ?? 1 };
-  }
-  if (error.parameters.migrate_to_chat_id !== undefined) {
-    return { kind: "chat-migrated", newChatId: error.parameters.migrate_to_chat_id };
-  }
-  if (error.error_code === 400 && /chat not found/i.test(error.description)) {
-    return { kind: "chat-not-found" };
-  }
-  if (error.error_code >= 500) {
-    return { kind: "unavailable", message: error.description };
-  }
-  return { kind: "rejected", code: error.error_code, description: error.description };
 }
 
 /** The SendError for a Telegram failure, or null if `error` isn't one. */

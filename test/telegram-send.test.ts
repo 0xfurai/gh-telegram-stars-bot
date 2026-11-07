@@ -13,6 +13,8 @@ describe("classifySendError", () => {
     [apiError(429, "Too Many Requests", { retry_after: 7 }), { kind: "rate-limited", retryAfter: 7 }],
     [apiError(429, "Too Many Requests"), { kind: "rate-limited", retryAfter: 1 }],
     [apiError(400, "Bad Request: chat not found"), { kind: "chat-not-found" }],
+    [apiError(400, "Bad Request: group chat was upgraded", { migrate_to_chat_id: -1009 }), { kind: "chat-migrated", newChatId: -1009 }],
+    [apiError(429, "Too Many Requests", { retry_after: 3, migrate_to_chat_id: -1009 }), { kind: "rate-limited", retryAfter: 3 }],
     [apiError(400, "Bad Request: message is too long"), { kind: "rejected", code: 400, description: "Bad Request: message is too long" }],
     [apiError(502, "Bad Gateway"), { kind: "unavailable", message: "Bad Gateway" }],
     [new HttpError("Network request failed", new Error("reset")), { kind: "unavailable", message: "Network request failed" }],

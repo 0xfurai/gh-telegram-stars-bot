@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseRepositoryInput } from "../src/repo-input";
+import { parseRepositoryInput, type RepositoryInputError } from "../src/repo-input";
+import { err, ok } from "../src/result";
 
 describe("parseRepositoryInput", () => {
   it.each([
@@ -19,28 +20,37 @@ describe("parseRepositoryInput", () => {
     ["HTTPS://GitHub.com/Facebook/React", "Facebook", "React"],
     ["github.com/facebook/react", "facebook", "react"],
   ])("parses %s", (input, owner, name) => {
-    expect(parseRepositoryInput(input)).toEqual({ owner, name });
+    expect(parseRepositoryInput(input)).toEqual(ok({ owner, name }));
   });
 
-  it.each([
-    "",
-    "react",
-    "yes/no maybe",
-    "a/b/c",
-    "-owner/repo",
-    "owner-/repo",
-    "own--er/repo",
-    "o".repeat(40) + "/repo",
-    "owner/" + "r".repeat(101),
-    "owner/.",
-    "owner/..",
-    "owner/re po",
-    "owner/repo!",
-    "https://gitlab.com/owner/repo",
-    "https://github.com/owner",
-    "https://github.com.evil.example/owner/repo",
-    "https://evil.example/github.com/owner/repo",
-  ])("rejects %j", (input) => {
-    expect(parseRepositoryInput(input)).toBeNull();
+  it.each<[string, RepositoryInputError]>([
+    ["", "not-a-repository"],
+    ["   ", "not-a-repository"],
+    ["owner/re po", "not-a-repository"],
+    ["owner/", "not-a-repository"],
+    ["/repo", "not-a-repository"],
+    ["ftp://github.com/a/b", "not-a-repository"],
+    ["https:/github.com/a/b", "not-a-repository"],
+    ["gitlab.com/owner/repo", "not-github"],
+    ["gitlab.com/owner", "not-github"],
+    ["t.me/foo", "not-github"],
+    ["react", "not-a-repository"],
+    ["yes/no maybe", "not-a-repository"],
+    ["a/b/c", "not-a-repository"],
+    ["https://github.com/owner", "not-a-repository"],
+    ["https://github.com.evil.example/owner/repo", "not-github"],
+    ["-owner/repo", "invalid-name"],
+    ["owner-/repo", "invalid-name"],
+    ["own--er/repo", "invalid-name"],
+    ["o".repeat(40) + "/repo", "invalid-name"],
+    ["owner/" + "r".repeat(101), "invalid-name"],
+    ["owner/.", "invalid-name"],
+    ["owner/..", "invalid-name"],
+    ["owner/repo!", "invalid-name"],
+    ["https://github.com/-owner/repo", "invalid-name"],
+    ["https://gitlab.com/owner/repo", "not-github"],
+    ["https://evil.example/github.com/owner/repo", "not-github"],
+  ])("rejects %j as %s", (input, reason) => {
+    expect(parseRepositoryInput(input)).toEqual(err(reason));
   });
 });

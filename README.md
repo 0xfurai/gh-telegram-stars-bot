@@ -1,5 +1,8 @@
 # Telegram GitHub Stars Bot
 
+[![CI](https://github.com/0xfurai/gh-telegram-stars-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/0xfurai/gh-telegram-stars-bot/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F0xfurai%2Fgh-telegram-stars-bot%2Fbadges%2Fcoverage.json)](https://github.com/0xfurai/gh-telegram-stars-bot/actions/workflows/ci.yml)
+
 A Telegram bot that notifies subscribers when GitHub repositories gain or lose stars.
 
 > **Migration in progress.** `main` is being rebuilt as a Cloudflare Worker with D1.

@@ -34,4 +34,12 @@ jobs:
       - run: bun run lint
 
       # `bun run test` runs Vitest. `bun test` would run Bun's own test runner.
-      - run: bun run test
+      # With coverage: the same tests, measured for the README badge.
+      - run: bun run test:coverage
+
+      - name: Keep the coverage summary for the badge
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-summary
+          path: coverage/coverage-summary.json
+          retention-days: 7

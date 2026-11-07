@@ -170,7 +170,7 @@ describe("star check", () => {
 
     const summary = await run({ telegram });
 
-    expect(telegram.sent).toEqual([{ chatId: 10, text: starNotifications([{ fullName: "owner/repo-1", gained: 5, total: 105 }]) }]);
+    expect(telegram.sent).toEqual([{ chatId: 10, text: starNotifications([{ fullName: "owner/repo-1", change: 5, total: 105 }]) }]);
     expect(await lastNotified(10, 1)).toBe(105);
     expect(await db.prepare("SELECT stars_gained FROM daily_star_gains").first("stars_gained")).toBe(5);
     expect(summary).toMatchObject({
@@ -214,7 +214,7 @@ describe("star check", () => {
     expect(telegram.sent[0]?.text).toContain("owner/repo-2");
   });
 
-  it("sends nothing for a star decrease", async () => {
+  it("notifies a star loss, and marks the lower count", async () => {
     await addRepo(1, 100);
     await subscribe(10, 1);
     githubStars.set(1, 98);
@@ -222,9 +222,62 @@ describe("star check", () => {
 
     const summary = await run({ telegram });
 
-    expect(telegram.attempts).toEqual([]);
+    expect(telegram.sent).toEqual([{ chatId: 10, text: starNotifications([{ fullName: "owner/repo-1", change: -2, total: 98 }]) }]);
     expect(summary.repositoriesChanged).toBe(1);
+    expect(await lastNotified(10, 1)).toBe(98);
     expect((await db.prepare("SELECT stars_count FROM repositories").first("stars_count")) as number).toBe(98);
+  });
+
+  it("sends a flapping count at most one gain and one loss an hour", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    const telegram = fakeTelegram();
+    const at = (minutes: number, stars: number) => {
+      githubStars.set(1, stars);
+      return run({ telegram, at: NOON + minutes * 60_000 });
+    };
+
+    await at(0, 101); // gain: sent
+    await at(5, 100); // loss: within the hour, held
+    await at(10, 101); // back where the chat was told: nothing due
+    await at(15, 100); // held
+    await at(61, 100); // an hour after the last message: sent
+
+    expect(telegram.sent.map((m) => m.text)).toEqual([
+      starNotifications([{ fullName: "owner/repo-1", change: 1, total: 101 }]),
+      starNotifications([{ fullName: "owner/repo-1", change: -1, total: 100 }]),
+    ]);
+  });
+
+  it("sends nothing when a gain and a loss cancel out between messages", async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    githubStars.set(1, 101);
+    await run({ telegram: fakeTelegram(() => "down") });
+    githubStars.set(1, 100);
+    const telegram = fakeTelegram();
+
+    await run({ telegram });
+
+    expect(telegram.attempts).toEqual([]);
+    expect(await lastNotified(10, 1)).toBe(100);
+  });
+
+  it("puts gains and losses for one chat in one message", async () => {
+    await addRepo(1, 100);
+    await addRepo(2, 50);
+    await subscribe(10, 1);
+    await subscribe(10, 2);
+    githubStars.set(1, 103);
+    githubStars.set(2, 49);
+    const telegram = fakeTelegram();
+
+    await run({ telegram });
+
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0]?.text).toContain("Star changes");
+    expect(telegram.sent[0]?.text).toContain("+3 (⭐ 103)");
+    expect(telegram.sent[0]?.text).toContain("\u22121 (⭐ 49)");
   });
 
   it("retries a failed send next run, with the newer stars", async () => {
@@ -240,7 +293,7 @@ describe("star check", () => {
     const telegram = fakeTelegram();
     await run({ telegram });
 
-    expect(telegram.sent[0]?.text).toBe(starNotifications([{ fullName: "owner/repo-1", gained: 7, total: 107 }]));
+    expect(telegram.sent[0]?.text).toBe(starNotifications([{ fullName: "owner/repo-1", change: 7, total: 107 }]));
     expect(await lastNotified(10, 1)).toBe(107);
   });
 
@@ -363,7 +416,7 @@ describe("chats that can't be reached", () => {
 
     const telegram = fakeTelegram();
     await run({ telegram });
-    expect(telegram.sent[0]?.text).toBe(starNotifications([{ fullName: "owner/repo-1", gained: 4, total: 104 }]));
+    expect(telegram.sent[0]?.text).toBe(starNotifications([{ fullName: "owner/repo-1", change: 4, total: 104 }]));
   });
 
   it("skips a deactivated chat's remaining messages in the same run", async () => {
@@ -634,7 +687,7 @@ describe("building deliveries", () => {
   });
 
   it("refuses to build a notification with no repositories or too many", () => {
-    const update = { fullName: "o/r", gained: 1, total: 2 };
+    const update = { fullName: "o/r", change: 1, total: 2 };
 
     expect(() => starNotifications([])).toThrow(RangeError);
     expect(() => starNotifications(Array.from({ length: MAX_UPDATES_PER_MESSAGE + 1 }, () => update))).toThrow(RangeError);

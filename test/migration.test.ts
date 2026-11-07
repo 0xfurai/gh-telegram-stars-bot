@@ -225,7 +225,7 @@ describe("compareCopies", () => {
     expect(differences.join("\n")).toContain("chat 1: subscribed to [10] in D1, [10, 20] in Supabase");
     expect(differences.join("\n")).toContain("name facebook/renamed in D1, facebook/react in Supabase");
     expect(differences.join("\n")).toContain("1 stars in D1, 230000 in Supabase");
-    expect(differences.join("\n")).toContain("last notified 230000, above its 1 stars");
+    expect(differences.join("\n")).toContain("last notified 230000, not its 1 stars");
   });
 });
 

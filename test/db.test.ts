@@ -27,6 +27,10 @@ import { err, ok } from "../src/result";
 
 const db = env.DB;
 const DAY = "2026-11-07";
+/** When markNotifiedMany records a send in these tests. */
+const AT = "2026-11-07T12:00:00.000Z";
+/** Losses are due for subscriptions not notified after this. */
+const LOSSES_AFTER = "2026-11-07T11:00:00.000Z";
 
 function repo(id: number, overrides: Partial<RepositoryInfo> = {}): RepositoryInfo {
   return {
@@ -278,18 +282,26 @@ describe("star check", () => {
     expect((await recordStarCheck(db, [update(20, 49)], DAY)).rowsWritten).toBe(1);
   });
 
-  it("lists due notifications only for active chats with new stars", async () => {
+  it("lists due notifications for losses too", async () => {
+    await recordStarCheck(db, [update(10, 97)], DAY);
+
+    expect(await listDueNotifications(db, 100, LOSSES_AFTER)).toEqual([
+      { chatId: 1, repositoryId: 10, fullName: "owner/repo-10", starsCount: 97, lastNotifiedStars: 100 },
+    ]);
+  });
+
+  it("lists due notifications only for active chats whose count changed", async () => {
     await subscribe(db, 2, 10, 50);
     await subscribe(db, 3, 10, 50);
     await setChatActive(db, 3, false);
     await recordStarCheck(db, [update(10, 105)], DAY);
 
-    const due = await listDueNotifications(db, 100);
+    const due = await listDueNotifications(db, 100, LOSSES_AFTER);
     expect(due.sort((a, b) => a.chatId - b.chatId)).toEqual([
       { chatId: 1, repositoryId: 10, fullName: "owner/repo-10", starsCount: 105, lastNotifiedStars: 100 },
       { chatId: 2, repositoryId: 10, fullName: "owner/repo-10", starsCount: 105, lastNotifiedStars: 100 },
     ]);
-    expect(await listDueNotifications(db, 1)).toHaveLength(1);
+    expect(await listDueNotifications(db, 1, LOSSES_AFTER)).toHaveLength(1);
   });
 
   it("returns due notifications in varying order, so failing rows can't block the rest", async () => {
@@ -300,22 +312,38 @@ describe("star check", () => {
 
     const firstPicks = new Set<number>();
     for (let run = 0; run < 20; run++) {
-      const [first] = await listDueNotifications(db, 1);
+      const [first] = await listDueNotifications(db, 1, LOSSES_AFTER);
       firstPicks.add(first?.chatId ?? 0);
     }
     expect(firstPicks.size).toBeGreaterThan(1);
   });
 
-  it("markNotifiedMany raises last_notified_stars but never lowers it", async () => {
-    await markNotifiedMany(db, [
+  it("markNotifiedMany sets what the chat was told, lower counts included", async () => {
+    const items = [
       { chatId: 1, repositoryId: 10, starsCount: 105 },
       { chatId: 1, repositoryId: 20, starsCount: 51 },
-    ]);
-    await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 103 }]);
-    await markNotifiedMany(db, []);
+    ];
+    await markNotifiedMany(db, items, AT);
+    await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 103 }], AT);
+    await markNotifiedMany(db, [], AT);
 
-    expect(await lastNotified(1, 10)).toBe(105);
+    expect(await lastNotified(1, 10)).toBe(103);
     expect(await lastNotified(1, 20)).toBe(51);
+  });
+
+  it("holds a loss back while the subscription was notified within the cooldown", async () => {
+    await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 101 }], "2026-11-07T11:30:00.000Z");
+    await recordStarCheck(db, [update(10, 99)], DAY);
+
+    expect(await listDueNotifications(db, 100, LOSSES_AFTER)).toEqual([]);
+    expect(await listDueNotifications(db, 100, "2026-11-07T11:30:00.000Z")).toHaveLength(1);
+  });
+
+  it("sends a gain at once, cooldown or not", async () => {
+    await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 99 }], "2026-11-07T11:59:00.000Z");
+    await recordStarCheck(db, [update(10, 101)], DAY);
+
+    expect(await listDueNotifications(db, 100, LOSSES_AFTER)).toHaveLength(1);
   });
 
   it("loads the repositories to check and the cursor together", async () => {

@@ -411,22 +411,28 @@ export async function recordStarCheck(
 }
 
 /**
- * Notifications that are due: active chats whose repository has more stars
- * than they were last told about. Random order, so rows whose sends keep
- * failing can't crowd out the rest. Reads every subscription once.
+ * Notifications that are due: active chats whose repository's star count
+ * differs from what they were last told. A gain is due at once; a loss only
+ * if the chat wasn't notified about that repository after `lossesAfter` (an
+ * ISO time), so a flapping count can't send a message every run (see
+ * migrations/0005). Random order, so rows whose sends keep failing can't
+ * crowd out the rest. Reads every subscription once.
  */
-export async function listDueNotifications(db: D1Database, limit: number): Promise<DueNotification[]> {
+export async function listDueNotifications(db: D1Database, limit: number, lossesAfter: string): Promise<DueNotification[]> {
   const { results } = await db
     .prepare(
       `SELECT cr.chat_id, r.id AS repository_id, r.full_name, r.stars_count, cr.last_notified_stars
        FROM chat_repositories cr
        JOIN repositories r ON r.id = cr.repository_id
        JOIN chats c ON c.id = cr.chat_id
-       WHERE c.is_active = 1 AND r.stars_count > cr.last_notified_stars
+       WHERE c.is_active = 1
+         AND (r.stars_count > cr.last_notified_stars
+              OR (r.stars_count < cr.last_notified_stars
+                  AND (cr.last_notified_at IS NULL OR cr.last_notified_at <= ?2)))
        ORDER BY random()
-       LIMIT ?`,
+       LIMIT ?1`,
     )
-    .bind(limit)
+    .bind(limit, lossesAfter)
     .all<{
       chat_id: number;
       repository_id: number;
@@ -445,13 +451,15 @@ export async function listDueNotifications(db: D1Database, limit: number): Promi
 }
 
 /**
- * Records that chats were told about `starsCount`, in one batch (one D1 call),
- * for a message that covered all of them. Never lowers the value. Overlapping
- * runs are prevented by the run lock, not by this.
+ * Records that chats were told about `starsCount` at `at` (an ISO time), in
+ * one batch (one D1 call), for a message that covered all of them. Lower
+ * counts too: losses are reported. Rows already at the count aren't written.
+ * Overlapping runs are prevented by the run lock, not by this.
  */
 export async function markNotifiedMany(
   db: D1Database,
   items: readonly { chatId: number; repositoryId: number; starsCount: number }[],
+  at: string,
 ): Promise<void> {
   if (items.length === 0) {
     return;
@@ -460,10 +468,10 @@ export async function markNotifiedMany(
     items.map((item) =>
       db
         .prepare(
-          `UPDATE chat_repositories SET last_notified_stars = ?3
-           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars < ?3`,
+          `UPDATE chat_repositories SET last_notified_stars = ?3, last_notified_at = ?4
+           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars <> ?3`,
         )
-        .bind(item.chatId, item.repositoryId, item.starsCount),
+        .bind(item.chatId, item.repositoryId, item.starsCount, at),
     ),
   );
 }

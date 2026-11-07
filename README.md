@@ -1,6 +1,6 @@
 # Telegram GitHub Stars Bot
 
-A Telegram bot that notifies subscribers about new stars on GitHub repositories.
+A Telegram bot that notifies subscribers when GitHub repositories gain or lose stars.
 
 > **Migration in progress.** `main` is being rebuilt as a Cloudflare Worker with D1.
 > Production still runs the old Node.js app from the [`legacy`](../../tree/legacy) branch, which has its own README.
@@ -99,7 +99,7 @@ A Cron Trigger runs `src/star-check.ts` every 5 minutes:
 
 1. Checks subscribed repositories on GitHub, 100 per GraphQL request, continuing from where the last run stopped.
 2. Saves what changed (stars, names, descriptions) and today's gains.
-3. Sends due notifications: one message per chat, listing every repository that gained stars since that chat was last told. A chat is only marked notified after Telegram accepts the message, so a failed send is retried next run.
+3. Sends due notifications: one message per chat, listing every repository whose star count changed since that chat was last told, up or down. The change is the net one: a star gained and lost between two messages sends nothing. Gains go out at once; a loss waits until that subscription hasn't been notified for an hour, so a count that keeps flapping sends at most one gain and one loss an hour. A chat is only marked notified after Telegram accepts the message, so a failed send is retried next run.
 
 `NOTIFICATIONS` controls step 3:
 

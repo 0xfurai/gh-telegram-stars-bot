@@ -2,10 +2,13 @@
 //
 // 1. Check the subscribed repositories on GitHub, continuing from the cursor.
 // 2. Save what changed (stars, names, descriptions) and today's gains.
-// 3. Send due notifications: subscriptions whose repository has more stars
-//    than the chat was last told about. A chat with several such repositories
-//    gets one message. last_notified_stars is raised only after a successful
-//    send, so a failed send is retried next run, with any newer stars.
+// 3. Send due notifications: subscriptions whose repository's star count
+//    differs from what the chat was last told. Gains go at once; losses wait
+//    until the subscription hasn't been notified for LOSS_COOLDOWN_MS, so a
+//    flapping count can't send a message every run. A chat with several due
+//    repositories gets one message. last_notified_stars is set only after a
+//    successful send, so a failed send is retried next run, with the newer
+//    count.
 //
 // Notifications are sent, logged or held according to NOTIFICATIONS. A run
 // lock keeps two runs from overlapping and sending the same notification.
@@ -133,7 +136,7 @@ function messageFor(delivery: Delivery): string {
   return starNotifications(
     delivery.items.map((item) => ({
       fullName: item.fullName,
-      gained: item.starsCount - item.lastNotifiedStars,
+      change: item.starsCount - item.lastNotifiedStars,
       total: item.starsCount,
     })),
   );
@@ -197,6 +200,8 @@ interface SendContext {
   summary: RunSummary;
   /** Chats deactivated or migrated during this run: their remaining messages are skipped. */
   unreachable: Set<number>;
+  /** The run's time (its scheduled time), recorded as when chats were notified. */
+  now: number;
 }
 
 /**
@@ -206,7 +211,7 @@ interface SendContext {
  */
 async function markSent(context: SendContext, delivery: Delivery): Promise<Next> {
   try {
-    await markNotifiedMany(context.deps.db, delivery.items);
+    await markNotifiedMany(context.deps.db, delivery.items, new Date(context.now).toISOString());
     return "next-delivery";
   } catch (error) {
     console.error(
@@ -327,7 +332,7 @@ async function skipAll(context: SendContext, deliveries: readonly Delivery[], re
   }
   const batches = chunk(deliveries.flatMap((delivery) => delivery.items), MARK_BATCH_SIZE);
   for (const batch of batches) {
-    await markNotifiedMany(context.deps.db, batch);
+    await markNotifiedMany(context.deps.db, batch, new Date(context.now).toISOString());
     context.summary.notificationsSkipped += batch.length;
   }
   return batches.length;
@@ -350,6 +355,14 @@ function messageBudget(summary: RunSummary, limits: StarCheckLimits, extraCalls:
   return Math.max(0, Math.min(limits.messages, Math.floor(spare / SUBREQUESTS_PER_MESSAGE)));
 }
 
+/** A flapping count sends at most one gain and one loss per subscription in this time. */
+export const LOSS_COOLDOWN_MS = 60 * 60 * 1000;
+
+function listDue(context: SendContext, limits: StarCheckLimits): Promise<DueNotification[]> {
+  const lossesAfter = new Date(context.now - LOSS_COOLDOWN_MS).toISOString();
+  return listDueNotifications(context.deps.db, limits.dueRows, lossesAfter);
+}
+
 async function notify(context: SendContext, limits: StarCheckLimits): Promise<number> {
   const mode = context.config.notifications;
   switch (mode) {
@@ -358,13 +371,13 @@ async function notify(context: SendContext, limits: StarCheckLimits): Promise<nu
       return 0;
     case "dry-run": {
       // Same budget as sending, so the shadow run behaves like the real thing.
-      const deliveries = groupDeliveries(await listDueNotifications(context.deps.db, limits.dueRows));
+      const deliveries = groupDeliveries(await listDue(context, limits));
       const max = messageBudget(context.summary, limits, 0);
       context.summary.notificationsLeft += countItems(deliveries.slice(max));
       return skipAll(context, deliveries.slice(0, max), "dry-run");
     }
     case "on": {
-      const due = await listDueNotifications(context.deps.db, limits.dueRows);
+      const due = await listDue(context, limits);
       const { allowed, notAllowed } = splitAllowed(groupDeliveries(due), context.config.allowedChatIds);
       const skipCalls = await skipAll(context, notAllowed, "chat not in ALLOWED_CHAT_IDS");
       await sendAll(context, allowed, messageBudget(context.summary, limits, skipCalls));
@@ -467,7 +480,10 @@ async function checkAndNotify(
     timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
     ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
   });
-  const sendCalls = await notify({ config, deps, api, summary, unreachable: new Set() }, limits);
+  const sendCalls = await notify(
+    { config, deps, api, summary, unreachable: new Set(), now: controller.scheduledTime },
+    limits,
+  );
   summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
   summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
 }

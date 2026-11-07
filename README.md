@@ -151,21 +151,24 @@ All three scripts need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; the copy 
 ```sh
 # 0. Before a full copy: a Supabase backup (pg_dump), kept outside the repo.
 
+# --env is required on every script: production or staging, the D1 database to use.
+
 # 1. Build the SQL. Only reads Supabase, GitHub and (shadow) D1; writes a file to your temp folder.
-bun run migrate:copy -- --mode=shadow     # daily during the shadow run
-bun run migrate:copy -- --mode=full       # the final copy at the switch
+bun run migrate:copy -- --env=production --mode=shadow   # daily during the shadow run
+bun run migrate:copy -- --env=production --mode=full     # the final copy at the switch
+bun run migrate:copy -- --env=staging --mode=full        # production data into staging, for the rehearsal
 
 # 2. Apply it (the script prints the exact commands, including step 3's).
-bunx wrangler d1 execute DB --remote --file <file>
+bunx wrangler d1 execute DB --remote [--env staging] --file <file>
 
 # 3. Verify: compares every chat, subscription and repository; fails on any difference.
 #    --today is the day the copy ran, so a copy just before midnight UTC verifies after it.
-bun run migrate:verify -- --mode=full --today=<day>   # or --mode=shadow; --local for a dry run
+bun run migrate:verify -- --env=production --mode=full --today=<day>   # or --mode=shadow; --local for a dry run
 
 # Rollback only: copy D1 back to Supabase (chats, subscriptions, star counts).
-bun run migrate:copy-back -- --dry-run    # see what would change
-bun run migrate:copy-back
-bun run migrate:verify -- --mode=shadow
+bun run migrate:copy-back -- --env=production --dry-run   # see what would change
+bun run migrate:copy-back -- --env=production
+bun run migrate:verify -- --env=production --mode=shadow
 ```
 
 The two copy modes:

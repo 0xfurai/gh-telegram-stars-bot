@@ -1,6 +1,7 @@
 // I/O for the copy scripts: Supabase's REST API, GitHub's REST API, and D1
 // through wrangler. `fetch` and the command runner can be replaced in tests.
 import { chunk } from "../../src/chunk.ts";
+import { assertNever } from "../../src/result.ts";
 import { normalizeExport, type RawSupabaseExport } from "./normalize.ts";
 import { SNAPSHOT_QUERIES, type D1Snapshot, type NodeIds, type SupabaseExport } from "./types.ts";
 
@@ -172,14 +173,42 @@ export async function lookUpNodeIds(github: GitHub, githubIds: readonly number[]
 /** Runs a command and returns its stdout. */
 export type RunCommand = (command: string, args: readonly string[]) => Promise<string>;
 
+/** Which D1 database: the wrangler environment, remote or local (a dry run). */
+export interface D1Target {
+  environment: "production" | "staging";
+  location: "remote" | "local";
+}
+
+/** wrangler's flags for a target. Production is wrangler.jsonc's top level, so it has no --env. */
+export function wranglerTargetArgs(target: D1Target): string[] {
+  const location = `--${target.location}`;
+  switch (target.environment) {
+    case "production":
+      return [location];
+    case "staging":
+      return [location, "--env", "staging"];
+    default:
+      return assertNever(target.environment);
+  }
+}
+
 /**
  * Reads a D1Snapshot with one `wrangler d1 execute --json` call running all
  * four queries. One call, not four in parallel: local wrangler runs fail
  * when they overlap.
  */
-export async function readD1Snapshot(run: RunCommand, target: "--remote" | "--local"): Promise<D1Snapshot> {
+export async function readD1Snapshot(run: RunCommand, target: D1Target): Promise<D1Snapshot> {
   const queries = [SNAPSHOT_QUERIES.chats, SNAPSHOT_QUERIES.repositories, SNAPSHOT_QUERIES.subscriptions, SNAPSHOT_QUERIES.gains];
-  const output = await run("bunx", ["wrangler", "d1", "execute", "DB", target, "--json", "--command", queries.join("; ")]);
+  const output = await run("bunx", [
+    "wrangler",
+    "d1",
+    "execute",
+    "DB",
+    ...wranglerTargetArgs(target),
+    "--json",
+    "--command",
+    queries.join("; "),
+  ]);
   const results = (JSON.parse(output) as { results: unknown[] }[]).map((result) => result.results);
   if (results.length !== queries.length) {
     throw new Error(`Reading D1 returned ${results.length} results for ${queries.length} queries`);

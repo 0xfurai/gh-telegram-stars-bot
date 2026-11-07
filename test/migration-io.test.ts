@@ -5,6 +5,7 @@ import {
   lookUpNodeIds,
   readD1Snapshot,
   selectAll,
+  wranglerTargetArgs,
   upsert,
   type RunCommand,
 } from "../scripts/migration/io";
@@ -162,18 +163,38 @@ describe("readD1Snapshot", () => {
       return Promise.resolve(JSON.stringify(answer.map((results) => ({ results, success: true }))));
     };
 
-    const snapshot = await readD1Snapshot(run, "--local");
+    const snapshot = await readD1Snapshot(run, { environment: "staging", location: "remote" });
 
     expect(snapshot.chats).toEqual([{ id: 1, is_active: 1 }]);
     expect(snapshot.subscriptions).toEqual([{ chat_id: 1, repository_id: 10, last_notified_stars: 5 }]);
     expect(commands).toEqual([
-      ["bunx", "wrangler", "d1", "execute", "DB", "--local", "--json", "--command", Object.values(SNAPSHOT_QUERIES).join("; ")],
+      [
+        "bunx",
+        "wrangler",
+        "d1",
+        "execute",
+        "DB",
+        "--remote",
+        "--env",
+        "staging",
+        "--json",
+        "--command",
+        Object.values(SNAPSHOT_QUERIES).join("; "),
+      ],
     ]);
   });
 
   it("fails when wrangler returns fewer results than queries", async () => {
     const run: RunCommand = () => Promise.resolve(JSON.stringify([{ results: [], success: true }]));
 
-    await expect(readD1Snapshot(run, "--remote")).rejects.toThrow("Reading D1 returned 1 results for 4 queries");
+    await expect(readD1Snapshot(run, { environment: "production", location: "remote" })).rejects.toThrow(
+      "Reading D1 returned 1 results for 4 queries",
+    );
+  });
+
+  it("targets production as wrangler.jsonc's top level, and staging with --env", () => {
+    expect(wranglerTargetArgs({ environment: "production", location: "remote" })).toEqual(["--remote"]);
+    expect(wranglerTargetArgs({ environment: "production", location: "local" })).toEqual(["--local"]);
+    expect(wranglerTargetArgs({ environment: "staging", location: "remote" })).toEqual(["--remote", "--env", "staging"]);
   });
 });

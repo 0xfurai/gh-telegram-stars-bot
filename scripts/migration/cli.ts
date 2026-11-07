@@ -1,6 +1,6 @@
 // Shared command-line helpers for the copy scripts (Node 24).
 import { execFile } from "node:child_process";
-import type { RunCommand } from "./io.ts";
+import type { D1Target, RunCommand } from "./io.ts";
 import { gainsWindowStart, utcDay } from "./to-d1.ts";
 import type { CopyMode } from "./types.ts";
 
@@ -30,9 +30,18 @@ export function copyMode(): CopyMode {
   return mode;
 }
 
-/** Which D1 database wrangler talks to: --local for a dry run, remote by default. */
-export function d1Target(): "--remote" | "--local" {
-  return flag("local") ? "--local" : "--remote";
+/**
+ * Which D1 database: `--env` is required, with no default, so a script can't
+ * read or check production while meaning staging (or the reverse: copy-back
+ * would write staging's data into production Supabase). `--local` for a dry
+ * run against the local database.
+ */
+export function d1Target(): D1Target {
+  const environment = option("env");
+  if (environment !== "production" && environment !== "staging") {
+    throw new Error("Pass --env=production or --env=staging: the D1 database to use");
+  }
+  return { environment, location: flag("local") ? "local" : "remote" };
 }
 
 /** `--today=YYYY-MM-DD` when given (the day the copy ran), otherwise today in UTC. */

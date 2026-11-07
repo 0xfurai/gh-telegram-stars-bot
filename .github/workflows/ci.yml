@@ -11,6 +11,9 @@ permissions:
 jobs:
   check:
     uses: ./.github/workflows/check.yml
+    with:
+      # Only main's badge needs it; pull requests run the plain tests.
+      coverage: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   # Every push to main goes to staging; production is deployed by hand
   # (deploy-production.yml).
@@ -21,3 +24,40 @@ jobs:
     with:
       environment: staging
     secrets: inherit
+
+  # The README's coverage badge: shields.io reads coverage.json from the
+  # "badges" branch. Only pushes to main update it, so pull requests can't.
+  coverage-badge:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: nexus-runner
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    # Back-to-back pushes: the newest run wins, an older one can't overwrite it.
+    concurrency:
+      group: coverage-badge
+      cancel-in-progress: true
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-badge
+
+      - name: Publish the badge to the badges branch
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git init -q badges
+          mv badge.json badges/coverage.json
+          cd badges
+          git symbolic-ref HEAD refs/heads/badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage.json
+          git commit -q -m "Coverage badge for ${GITHUB_SHA}"
+          # The token goes in an auth header set through the environment, so it
+          # never appears in a command line or a URL.
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+          # One commit, force-pushed: the branch holds only the latest badge.
+          git push -q --force "https://github.com/${GITHUB_REPOSITORY}.git" badges

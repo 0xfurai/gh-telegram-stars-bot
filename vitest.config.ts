@@ -22,5 +22,13 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     setupFiles: ["./test/apply-migrations.ts"],
+    // `bun run test:coverage`. Istanbul, because V8 coverage doesn't work in
+    // the Workers runtime. Everything is measured, the copy scripts' untested
+    // command-line entry points too, so the README badge is the honest total.
+    coverage: {
+      provider: "istanbul",
+      include: ["src/**/*.ts", "scripts/**/*.ts"],
+      reporter: ["text-summary", "json-summary"],
+    },
   },
 });

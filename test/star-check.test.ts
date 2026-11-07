@@ -291,10 +291,20 @@ describe("star check", () => {
   });
 
   it("continues the GitHub check from the cursor when the request budget runs out", async () => {
-    for (let id = 1; id <= 150; id++) {
-      await addRepo(id, 10);
-      await subscribe(1, id);
-    }
+    // One batch, not 300 awaited inserts: those took over 5 seconds on a busy CI runner.
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1);
+    ids.forEach((id) => githubStars.set(id, 10));
+    await db.batch([
+      db.prepare("INSERT INTO chats (id) VALUES (1)"),
+      ...ids.map((id) =>
+        db
+          .prepare("INSERT INTO repositories (id, github_node_id, full_name, stars_count) VALUES (?, ?, ?, 10)")
+          .bind(id, `R_${id}`, `owner/repo-${id}`),
+      ),
+      ...ids.map((id) =>
+        db.prepare("INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars) VALUES (1, ?, 10)").bind(id),
+      ),
+    ]);
 
     const summary = await run({ limits: { githubRequests: 1 } });
 

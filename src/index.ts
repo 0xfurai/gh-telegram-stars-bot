@@ -17,8 +17,8 @@ export default {
     const settings = loadConfig(env);
     if (!settings.ok) {
       // Fail the run visibly instead of skipping it quietly.
-      throw new Error(`Invalid Worker settings: ${settings.errors.join("; ")}`);
+      throw new Error(`Invalid Worker settings: ${settings.error.join("; ")}`);
     }
-    handleScheduled(controller, settings.config);
+    handleScheduled(controller, settings.value);
   },
 } satisfies ExportedHandler<Env>;

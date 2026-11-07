@@ -9,7 +9,7 @@ function parse(overrides: Record<string, string | undefined> = {}): ConfigResult
 }
 
 function errorsOf(result: ConfigResult): string[] {
-  return result.ok ? [] : result.errors;
+  return result.ok ? [] : result.error;
 }
 
 function botInfo(id: number): string {
@@ -20,7 +20,7 @@ describe("parseConfig", () => {
   it("accepts valid settings and fills in defaults", () => {
     expect(parse()).toEqual({
       ok: true,
-      config: {
+      value: {
         telegramBotToken: TEST_SETTINGS.TELEGRAM_BOT_TOKEN,
         githubToken: TEST_SETTINGS.GITHUB_TOKEN,
         webhookSecret: TEST_SETTINGS.WEBHOOK_SECRET,
@@ -57,20 +57,20 @@ describe("parseConfig", () => {
       MAX_REPOS_PER_CHAT: " 10\n",
     });
 
-    expect(result.ok && result.config.telegramBotToken).toBe(TEST_SETTINGS.TELEGRAM_BOT_TOKEN);
-    expect(result.ok && result.config.notifications).toBe("on");
-    expect(result.ok && result.config.maxReposPerChat).toBe(10);
+    expect(result.ok && result.value.telegramBotToken).toBe(TEST_SETTINGS.TELEGRAM_BOT_TOKEN);
+    expect(result.ok && result.value.notifications).toBe("on");
+    expect(result.ok && result.value.maxReposPerChat).toBe(10);
   });
 
   it("parses ALLOWED_CHAT_IDS, ignoring spaces and empty entries", () => {
     const result = parse({ ALLOWED_CHAT_IDS: " 42, -1001234567890 ,," });
 
-    expect(result.ok && [...(result.config.allowedChatIds ?? [])]).toEqual([42, -1001234567890]);
+    expect(result.ok && [...(result.value.allowedChatIds ?? [])]).toEqual([42, -1001234567890]);
   });
 
   it("treats an empty ALLOWED_CHAT_IDS as no restriction", () => {
     expect(parse({ ALLOWED_CHAT_IDS: "" }).ok && parse({ ALLOWED_CHAT_IDS: "" })).toMatchObject({
-      config: { allowedChatIds: null },
+      value: { allowedChatIds: null },
     });
   });
 
@@ -90,12 +90,12 @@ describe("parseConfig", () => {
   it("parses an optional ADMIN_CHAT_ID", () => {
     const result = parse({ ADMIN_CHAT_ID: "-1001234567890" });
 
-    expect(result.ok && result.config.adminChatId).toBe(-1001234567890);
+    expect(result.ok && result.value.adminChatId).toBe(-1001234567890);
   });
 
   it("validates MAX_REPOS_PER_CHAT, defaulting when empty", () => {
     expect(parse({ MAX_REPOS_PER_CHAT: "" }).ok && parse({ MAX_REPOS_PER_CHAT: "" })).toMatchObject({
-      config: { maxReposPerChat: 50 },
+      value: { maxReposPerChat: 50 },
     });
     for (const value of ["ten", "0", "501", "-5"]) {
       expect(errorsOf(parse({ MAX_REPOS_PER_CHAT: value }))).toEqual([

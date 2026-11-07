@@ -25,6 +25,12 @@ export default defineConfig(
     rules: {
       // Keep every function small enough to read and test (max 10 branches).
       complexity: ["error", 10],
+      // Rust-style exhaustive matching: a switch over a union (an outcome or
+      // error type) must handle every case. See src/result.ts.
+      "@typescript-eslint/switch-exhaustiveness-check": [
+        "error",
+        { considerDefaultExhaustiveForUnions: false, requireDefaultForNonUnion: true },
+      ],
     },
   },
   {

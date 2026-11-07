@@ -8,7 +8,6 @@ import {
   listSubscribers,
   listSubscriptions,
   markNotified,
-  markRepositoryGone,
   pruneStarGains,
   recordStarCheck,
   repositoryUrl,
@@ -18,9 +17,12 @@ import {
   upsertRepository,
   utcDay,
   type RepositoryInfo,
+  type StarCheckUpdate,
 } from "../src/db";
+import { err, ok } from "../src/result";
 
 const db = env.DB;
+const DAY = "2026-11-07";
 
 function repo(id: number, overrides: Partial<RepositoryInfo> = {}): RepositoryInfo {
   return {
@@ -32,6 +34,10 @@ function repo(id: number, overrides: Partial<RepositoryInfo> = {}): RepositoryIn
     isArchived: false,
     ...overrides,
   };
+}
+
+function update(id: number, starsCount: number, overrides: Partial<StarCheckUpdate> = {}): StarCheckUpdate {
+  return { id, fullName: `owner/repo-${id}`, starsCount, isArchived: false, ...overrides };
 }
 
 async function lastNotified(chatId: number, repositoryId: number): Promise<number | undefined> {
@@ -49,17 +55,15 @@ async function stored(id: number) {
     .first<{ full_name: string; stars_count: number; is_archived: number }>();
 }
 
+async function isActive(chatId: number): Promise<number | null> {
+  return db.prepare("SELECT is_active FROM chats WHERE id = ?").bind(chatId).first<number>("is_active");
+}
+
 async function gains() {
   const { results } = await db
     .prepare("SELECT repository_id, day, stars_gained FROM daily_star_gains ORDER BY repository_id, day")
     .all();
   return results;
-}
-
-/** rows_written of a single statement, to check write costs. */
-async function rowsWritten(sql: string, ...params: unknown[]): Promise<number> {
-  const result = await db.prepare(sql).bind(...params).run();
-  return result.meta.rows_written;
 }
 
 beforeEach(async () => {
@@ -72,76 +76,82 @@ beforeEach(async () => {
 });
 
 describe("chats", () => {
-  it("ensureChat creates a chat once and costs nothing when it exists", async () => {
-    await ensureChat(db, 1);
-    await ensureChat(db, 1);
+  it("ensureChat creates a chat once, then writes nothing while it's active", async () => {
+    expect(await ensureChat(db, 1)).toBe(true);
+    expect(await ensureChat(db, 1)).toBe(false);
+    expect(await isActive(1)).toBe(1);
+  });
 
-    const written = await rowsWritten("INSERT INTO chats (id) VALUES (?) ON CONFLICT (id) DO NOTHING", 1);
-    const rows = await db.prepare("SELECT id, is_active FROM chats").all();
+  it("ensureChat reactivates a chat marked inactive", async () => {
+    await setChatActive(db, 1, false);
 
-    expect(rows.results).toEqual([{ id: 1, is_active: 1 }]);
-    expect(written).toBe(0);
+    expect(await ensureChat(db, 1)).toBe(true);
+    expect(await isActive(1)).toBe(1);
   });
 
   it("setChatActive deactivates and reactivates, creating the chat if needed", async () => {
     await setChatActive(db, 5, false);
-    expect(await db.prepare("SELECT is_active FROM chats WHERE id = 5").first("is_active")).toBe(0);
+    expect(await isActive(5)).toBe(0);
 
     await setChatActive(db, 5, true);
-    expect(await db.prepare("SELECT is_active FROM chats WHERE id = 5").first("is_active")).toBe(1);
+    expect(await isActive(5)).toBe(1);
   });
 });
 
 describe("repositories", () => {
   it("upsertRepository inserts, then refreshes on rename", async () => {
-    await upsertRepository(db, repo(10));
-    await upsertRepository(db, repo(10, { fullName: "new-owner/renamed", starsCount: 150 }));
+    await upsertRepository(db, repo(10), DAY);
+    await upsertRepository(db, repo(10, { fullName: "new-owner/renamed", isArchived: true }), DAY);
 
-    expect(await stored(10)).toEqual({ full_name: "new-owner/renamed", stars_count: 150, is_archived: 0 });
+    expect(await stored(10)).toEqual({ full_name: "new-owner/renamed", stars_count: 100, is_archived: 1 });
+  });
+
+  it("upsertRepository records stars gained since the last check instead of losing them", async () => {
+    await upsertRepository(db, repo(10, { starsCount: 100 }), DAY);
+    await upsertRepository(db, repo(10, { starsCount: 120 }), DAY);
+    await upsertRepository(db, repo(10, { starsCount: 118 }), DAY);
+
+    expect(await gains()).toEqual([{ repository_id: 10, day: DAY, stars_gained: 20 }]);
+    expect((await stored(10))?.stars_count).toBe(118);
   });
 
   it("builds repository URLs from the name", () => {
     expect(repositoryUrl("facebook/react")).toBe("https://github.com/facebook/react");
   });
 
-  it("lists only repositories worth checking", async () => {
-    await ensureChat(db, 1);
-    for (const info of [
-      repo(1),
-      repo(2, { isArchived: true }),
-      repo(3),
-      repo(4),
-    ]) {
-      await upsertRepository(db, info);
+  it("checks repositories with an active subscriber and a node ID, archived ones included", async () => {
+    for (const info of [repo(1), repo(2, { isArchived: true }), repo(3), repo(4), repo(5)]) {
+      await upsertRepository(db, info, DAY);
     }
     await db.prepare("UPDATE repositories SET github_node_id = NULL WHERE id = 4").run();
     for (const id of [1, 2, 4]) {
       await subscribe(db, 1, id, 50);
     }
-    // 2 is archived, 3 has no subscribers, 4 has no node ID.
+    await subscribe(db, 2, 5, 50);
+    await setChatActive(db, 2, false);
+    // 3 has no subscribers, 4 has no node ID, 5's only subscriber is inactive.
 
-    expect(await listRepositoriesToCheck(db)).toEqual([
-      { id: 1, nodeId: "R_1", fullName: "owner/repo-1", starsCount: 100 },
-    ]);
-  });
-
-  it("markRepositoryGone archives a repository", async () => {
-    await upsertRepository(db, repo(10));
-    await markRepositoryGone(db, 10);
-
-    expect((await stored(10))?.is_archived).toBe(1);
+    expect((await listRepositoriesToCheck(db)).map((r) => r.id)).toEqual([1, 2]);
   });
 });
 
 describe("subscribe", () => {
   beforeEach(async () => {
-    await ensureChat(db, 1);
-    await upsertRepository(db, repo(10, { starsCount: 250 }));
+    await upsertRepository(db, repo(10, { starsCount: 250 }), DAY);
   });
 
-  it("subscribes, starting at the current star count", async () => {
+  it("subscribes, creating the chat and starting at the current star count", async () => {
     expect(await subscribe(db, 1, 10, 50)).toBe("subscribed");
     expect(await lastNotified(1, 10)).toBe(250);
+    expect(await isActive(1)).toBe(1);
+  });
+
+  it("reactivates the chat", async () => {
+    await setChatActive(db, 1, false);
+
+    await subscribe(db, 1, 10, 50);
+
+    expect(await isActive(1)).toBe(1);
   });
 
   it("reports a second subscription to the same repository", async () => {
@@ -151,22 +161,18 @@ describe("subscribe", () => {
   });
 
   it("enforces the per-chat limit in the same statement", async () => {
-    await upsertRepository(db, repo(11));
-    await upsertRepository(db, repo(12));
+    await upsertRepository(db, repo(11), DAY);
+    await upsertRepository(db, repo(12), DAY);
 
     expect(await subscribe(db, 1, 10, 2)).toBe("subscribed");
     expect(await subscribe(db, 1, 11, 2)).toBe("subscribed");
     expect(await subscribe(db, 1, 12, 2)).toBe("limit-reached");
     // Already subscribed wins over the limit: nothing new would be added.
     expect(await subscribe(db, 1, 10, 2)).toBe("already-subscribed");
-
-    const count = await db.prepare("SELECT COUNT(*) AS n FROM chat_repositories").first("n");
-    expect(count).toBe(2);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM chat_repositories").first("n")).toBe(2);
   });
 
   it("keeps the limit per chat", async () => {
-    await ensureChat(db, 2);
-
     expect(await subscribe(db, 1, 10, 1)).toBe("subscribed");
     expect(await subscribe(db, 2, 10, 1)).toBe("subscribed");
   });
@@ -178,15 +184,13 @@ describe("subscribe", () => {
 
 describe("unsubscribe", () => {
   beforeEach(async () => {
-    await ensureChat(db, 1);
-    await ensureChat(db, 2);
-    await upsertRepository(db, repo(10, { fullName: "facebook/react" }));
+    await upsertRepository(db, repo(10, { fullName: "facebook/react" }), DAY);
     await subscribe(db, 1, 10, 50);
     await subscribe(db, 2, 10, 50);
   });
 
   it("matches the name case-insensitively and returns the stored name", async () => {
-    expect(await unsubscribe(db, 1, "Facebook/React")).toBe("facebook/react");
+    expect(await unsubscribe(db, 1, "Facebook/React")).toEqual(ok("facebook/react"));
     expect(await listSubscriptions(db, 1)).toEqual([]);
   });
 
@@ -196,19 +200,25 @@ describe("unsubscribe", () => {
     expect(await listSubscribers(db, 10)).toEqual([2]);
   });
 
-  it("returns null when the chat isn't subscribed", async () => {
-    await ensureChat(db, 3);
+  it("removes every subscription with the name, including a stale one", async () => {
+    // A deleted repo whose stored name is now used by a new repo.
+    await upsertRepository(db, repo(20, { fullName: "facebook/react" }), DAY);
+    await subscribe(db, 1, 20, 50);
 
-    expect(await unsubscribe(db, 3, "facebook/react")).toBeNull();
-    expect(await unsubscribe(db, 1, "facebook/vue")).toBeNull();
+    expect(await unsubscribe(db, 1, "facebook/react")).toEqual(ok("facebook/react"));
+    expect(await listSubscriptions(db, 1)).toEqual([]);
+  });
+
+  it("reports when the chat isn't subscribed", async () => {
+    expect(await unsubscribe(db, 3, "facebook/react")).toEqual(err("not-subscribed"));
+    expect(await unsubscribe(db, 1, "facebook/vue")).toEqual(err("not-subscribed"));
   });
 });
 
 describe("listing", () => {
   it("lists a chat's subscriptions, most-starred first", async () => {
-    await ensureChat(db, 1);
-    await upsertRepository(db, repo(1, { starsCount: 5 }));
-    await upsertRepository(db, repo(2, { starsCount: 500, isArchived: true }));
+    await upsertRepository(db, repo(1, { starsCount: 5 }), DAY);
+    await upsertRepository(db, repo(2, { starsCount: 500, isArchived: true }), DAY);
     await subscribe(db, 1, 1, 50);
     await subscribe(db, 1, 2, 50);
 
@@ -219,9 +229,8 @@ describe("listing", () => {
   });
 
   it("lists only active subscribers", async () => {
-    await upsertRepository(db, repo(10));
+    await upsertRepository(db, repo(10), DAY);
     for (const chatId of [1, 2, 3]) {
-      await ensureChat(db, chatId);
       await subscribe(db, chatId, 10, 50);
     }
     await setChatActive(db, 2, false);
@@ -232,77 +241,65 @@ describe("listing", () => {
 
 describe("star check", () => {
   beforeEach(async () => {
-    await ensureChat(db, 1);
-    await upsertRepository(db, repo(10, { starsCount: 100 }));
-    await upsertRepository(db, repo(20, { starsCount: 50 }));
+    await upsertRepository(db, repo(10, { starsCount: 100 }), DAY);
+    await upsertRepository(db, repo(20, { starsCount: 50 }), DAY);
     await subscribe(db, 1, 10, 50);
     await subscribe(db, 1, 20, 50);
   });
 
   it("saves increases with today's gain, and decreases without one", async () => {
-    await recordStarCheck(
-      db,
-      [
-        { id: 10, fullName: "owner/repo-10", starsCount: 105, isArchived: false, previousStarsCount: 100 },
-        { id: 20, fullName: "owner/renamed", starsCount: 48, isArchived: true, previousStarsCount: 50 },
-      ],
-      "2026-11-07",
-    );
-    await recordStarCheck(
-      db,
-      [{ id: 10, fullName: "owner/repo-10", starsCount: 108, isArchived: false, previousStarsCount: 105 }],
-      "2026-11-07",
-    );
+    await recordStarCheck(db, [update(10, 105), update(20, 48, { fullName: "owner/renamed", isArchived: true })], DAY);
+    await recordStarCheck(db, [update(10, 108)], DAY);
 
     expect(await stored(10)).toEqual({ full_name: "owner/repo-10", stars_count: 108, is_archived: 0 });
     expect(await stored(20)).toEqual({ full_name: "owner/renamed", stars_count: 48, is_archived: 1 });
-    expect(await gains()).toEqual([{ repository_id: 10, day: "2026-11-07", stars_gained: 8 }]);
+    expect(await gains()).toEqual([{ repository_id: 10, day: DAY, stars_gained: 8 }]);
+  });
+
+  it("records a gain once when overlapping runs see the same new count", async () => {
+    await recordStarCheck(db, [update(10, 105)], DAY);
+    await recordStarCheck(db, [update(10, 105)], DAY);
+
+    expect(await gains()).toEqual([{ repository_id: 10, day: DAY, stars_gained: 5 }]);
   });
 
   it("does nothing for an empty run", async () => {
-    expect(await recordStarCheck(db, [], "2026-11-07")).toEqual({ rowsWritten: 0 });
+    expect(await recordStarCheck(db, [], DAY)).toEqual({ rowsWritten: 0 });
     expect(await gains()).toEqual([]);
   });
 
   it("costs two written rows per increase and one per decrease", async () => {
-    const increase = await recordStarCheck(
-      db,
-      [{ id: 10, fullName: "owner/repo-10", starsCount: 105, isArchived: false, previousStarsCount: 100 }],
-      "2026-11-07",
-    );
-    const laterIncreaseSameDay = await recordStarCheck(
-      db,
-      [{ id: 10, fullName: "owner/repo-10", starsCount: 107, isArchived: false, previousStarsCount: 105 }],
-      "2026-11-07",
-    );
-    const decrease = await recordStarCheck(
-      db,
-      [{ id: 20, fullName: "owner/repo-20", starsCount: 49, isArchived: false, previousStarsCount: 50 }],
-      "2026-11-07",
-    );
-
-    expect(increase.rowsWritten).toBe(2);
-    expect(laterIncreaseSameDay.rowsWritten).toBe(2);
-    expect(decrease.rowsWritten).toBe(1);
+    expect((await recordStarCheck(db, [update(10, 105)], DAY)).rowsWritten).toBe(2);
+    expect((await recordStarCheck(db, [update(10, 107)], DAY)).rowsWritten).toBe(2);
+    expect((await recordStarCheck(db, [update(20, 49)], DAY)).rowsWritten).toBe(1);
   });
 
   it("lists due notifications only for active chats with new stars", async () => {
-    await ensureChat(db, 2);
     await subscribe(db, 2, 10, 50);
-    await ensureChat(db, 3);
     await subscribe(db, 3, 10, 50);
     await setChatActive(db, 3, false);
-    await recordStarCheck(
-      db,
-      [{ id: 10, fullName: "owner/repo-10", starsCount: 105, isArchived: false, previousStarsCount: 100 }],
-      "2026-11-07",
-    );
+    await recordStarCheck(db, [update(10, 105)], DAY);
 
-    expect(await listDueNotifications(db, 100)).toEqual([
+    const due = await listDueNotifications(db, 100);
+    expect(due.sort((a, b) => a.chatId - b.chatId)).toEqual([
       { chatId: 1, repositoryId: 10, fullName: "owner/repo-10", starsCount: 105, lastNotifiedStars: 100 },
       { chatId: 2, repositoryId: 10, fullName: "owner/repo-10", starsCount: 105, lastNotifiedStars: 100 },
     ]);
     expect(await listDueNotifications(db, 1)).toHaveLength(1);
+  });
+
+  it("returns due notifications in varying order, so failing rows can't block the rest", async () => {
+    for (let chatId = 2; chatId <= 30; chatId++) {
+      await subscribe(db, chatId, 10, 50);
+    }
+    await recordStarCheck(db, [update(10, 105)], DAY);
+
+    const firstPicks = new Set<number>();
+    for (let run = 0; run < 20; run++) {
+      const [first] = await listDueNotifications(db, 1);
+      firstPicks.add(first?.chatId ?? 0);
+    }
+    expect(firstPicks.size).toBeGreaterThan(1);
   });
 
   it("markNotified raises last_notified_stars but never lowers it", async () => {
@@ -310,20 +307,15 @@ describe("star check", () => {
     await markNotified(db, 1, 10, 103);
 
     expect(await lastNotified(1, 10)).toBe(105);
-    expect(await listDueNotifications(db, 100)).toEqual([]);
   });
 
   it("prunes gains older than a day", async () => {
-    for (const day of ["2026-08-08", "2026-08-09", "2026-11-07"]) {
-      await recordStarCheck(
-        db,
-        [{ id: 10, fullName: "owner/repo-10", starsCount: 101, isArchived: false, previousStarsCount: 100 }],
-        day,
-      );
+    for (const [day, stars] of [["2026-08-08", 101], ["2026-08-09", 102], [DAY, 103]] as const) {
+      await recordStarCheck(db, [update(10, stars)], day);
     }
 
     expect(await pruneStarGains(db, "2026-08-09")).toBe(1);
-    expect((await gains()).map((row) => row.day)).toEqual(["2026-08-09", "2026-11-07"]);
+    expect((await gains()).map((row) => row.day)).toEqual(["2026-08-09", DAY]);
   });
 
   it("formats UTC days", () => {
@@ -333,33 +325,29 @@ describe("star check", () => {
 });
 
 describe("stats", () => {
-  it("counts repositories, active chats, subscriptions and recent gains", async () => {
-    await ensureChat(db, 1);
-    await ensureChat(db, 2);
-    await setChatActive(db, 2, false);
-    await upsertRepository(db, repo(10));
+  it("counts repositories, active chats, subscriptions and gains since a day", async () => {
+    await upsertRepository(db, repo(10), DAY);
     await subscribe(db, 1, 10, 50);
     await subscribe(db, 2, 10, 50);
-    await recordStarCheck(
-      db,
-      [{ id: 10, fullName: "owner/repo-10", starsCount: 107, isArchived: false, previousStarsCount: 100 }],
-      "2026-11-07",
-    );
+    await setChatActive(db, 2, false);
+    await recordStarCheck(db, [update(10, 103)], "2026-07-01");
+    await recordStarCheck(db, [update(10, 110)], DAY);
 
-    expect(await getStats(db)).toEqual({
+    // The July gain is older than the cut-off, even though it wasn't pruned.
+    expect(await getStats(db, "2026-08-09")).toEqual({
       repositories: 1,
       activeChats: 1,
       subscriptions: 2,
-      starsGainedLast90Days: 7,
+      starsGained: 7,
     });
   });
 
   it("returns zeros for an empty database", async () => {
-    expect(await getStats(db)).toEqual({
+    expect(await getStats(db, "2026-08-09")).toEqual({
       repositories: 0,
       activeChats: 0,
       subscriptions: 0,
-      starsGainedLast90Days: 0,
+      starsGained: 0,
     });
   });
 });

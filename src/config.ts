@@ -4,6 +4,7 @@
 // Uses zod/mini: the same validation as full zod for about 4% of the bundle
 // size (17 KiB instead of 462 KiB minified).
 import * as z from "zod/mini";
+import { err, ok, type Result } from "./result";
 
 export const NOTIFICATION_MODES = ["on", "dry-run", "off"] as const;
 export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
@@ -129,9 +130,8 @@ const configSchema = z.pipe(
 
 export type AppConfig = z.output<typeof configSchema>;
 
-export type ConfigResult =
-  | { ok: true; config: AppConfig }
-  | { ok: false; errors: string[] };
+/** The parsed settings, or one message per invalid setting. */
+export type ConfigResult = Result<AppConfig, string[]>;
 
 /**
  * Trims every setting and treats empty ones as unset, so a stray newline in a
@@ -157,8 +157,8 @@ function formatIssue(issue: z.core.$ZodIssue): string {
 export function parseConfig(env: object): ConfigResult {
   const result = z.safeParse(configSchema, readSettings(env));
   return result.success
-    ? { ok: true, config: result.data }
-    : { ok: false, errors: result.error.issues.map(formatIssue) };
+    ? ok(result.data)
+    : err(result.error.issues.map(formatIssue));
 }
 
 // Settings don't change while an isolate lives, so parse (and log) once.
@@ -173,7 +173,7 @@ export function loadConfig(env: object): ConfigResult {
 
   const result = parseConfig(env);
   if (!result.ok) {
-    console.error(JSON.stringify({ message: "Invalid Worker settings", errors: result.errors }));
+    console.error(JSON.stringify({ message: "Invalid Worker settings", errors: result.error }));
   }
   cache.set(env, result);
   return result;

@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gh-telegram-stars-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-19",
+  // Declared secrets. This list, not .dev.vars or .env, decides the secret
+  // names in the generated types, so they don't depend on local files.
+  // Filled in by GSB-3.
+  "secrets": {
+    "required": []
+  },
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    // Star check schedule.
+    "crons": ["*/5 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gh-telegram-stars-bot",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

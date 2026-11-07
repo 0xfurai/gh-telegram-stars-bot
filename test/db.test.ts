@@ -278,6 +278,14 @@ describe("star check", () => {
     expect((await recordStarCheck(db, [update(20, 49)], DAY)).rowsWritten).toBe(1);
   });
 
+  it("lists due notifications for losses too", async () => {
+    await recordStarCheck(db, [update(10, 97)], DAY);
+
+    expect(await listDueNotifications(db, 100)).toEqual([
+      { chatId: 1, repositoryId: 10, fullName: "owner/repo-10", starsCount: 97, lastNotifiedStars: 100 },
+    ]);
+  });
+
   it("lists due notifications only for active chats with new stars", async () => {
     await subscribe(db, 2, 10, 50);
     await subscribe(db, 3, 10, 50);
@@ -306,7 +314,7 @@ describe("star check", () => {
     expect(firstPicks.size).toBeGreaterThan(1);
   });
 
-  it("markNotifiedMany raises last_notified_stars but never lowers it", async () => {
+  it("markNotifiedMany sets what the chat was told, lower counts included", async () => {
     await markNotifiedMany(db, [
       { chatId: 1, repositoryId: 10, starsCount: 105 },
       { chatId: 1, repositoryId: 20, starsCount: 51 },
@@ -314,9 +322,10 @@ describe("star check", () => {
     await markNotifiedMany(db, [{ chatId: 1, repositoryId: 10, starsCount: 103 }]);
     await markNotifiedMany(db, []);
 
-    expect(await lastNotified(1, 10)).toBe(105);
+    expect(await lastNotified(1, 10)).toBe(103);
     expect(await lastNotified(1, 20)).toBe(51);
   });
+
 
   it("loads the repositories to check and the cursor together", async () => {
     await setStarCheckCursor(db, 15);

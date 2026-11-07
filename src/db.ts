@@ -411,9 +411,10 @@ export async function recordStarCheck(
 }
 
 /**
- * Notifications that are due: active chats whose repository has more stars
- * than they were last told about. Random order, so rows whose sends keep
- * failing can't crowd out the rest. Reads every subscription once.
+ * Notifications that are due: active chats whose repository's star count
+ * differs from what they were last told, up or down. Random order, so rows
+ * whose sends keep failing can't crowd out the rest. Reads every
+ * subscription once.
  */
 export async function listDueNotifications(db: D1Database, limit: number): Promise<DueNotification[]> {
   const { results } = await db
@@ -422,7 +423,7 @@ export async function listDueNotifications(db: D1Database, limit: number): Promi
        FROM chat_repositories cr
        JOIN repositories r ON r.id = cr.repository_id
        JOIN chats c ON c.id = cr.chat_id
-       WHERE c.is_active = 1 AND r.stars_count > cr.last_notified_stars
+       WHERE c.is_active = 1 AND r.stars_count <> cr.last_notified_stars
        ORDER BY random()
        LIMIT ?`,
     )
@@ -446,8 +447,9 @@ export async function listDueNotifications(db: D1Database, limit: number): Promi
 
 /**
  * Records that chats were told about `starsCount`, in one batch (one D1 call),
- * for a message that covered all of them. Never lowers the value. Overlapping
- * runs are prevented by the run lock, not by this.
+ * for a message that covered all of them. Lower counts too: losses are
+ * reported. Rows already at the count aren't written. Overlapping runs are
+ * prevented by the run lock, not by this.
  */
 export async function markNotifiedMany(
   db: D1Database,
@@ -461,7 +463,7 @@ export async function markNotifiedMany(
       db
         .prepare(
           `UPDATE chat_repositories SET last_notified_stars = ?3
-           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars < ?3`,
+           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars <> ?3`,
         )
         .bind(item.chatId, item.repositoryId, item.starsCount),
     ),

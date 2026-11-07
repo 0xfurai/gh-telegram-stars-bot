@@ -46,6 +46,28 @@ describe("messages", () => {
     expect(messages.repositoryLink('a"b/c')).toBe('<a href="https://github.com/a&quot;b/c">a&quot;b/c</a>');
   });
 
+  it("formats a star loss", () => {
+    expect(messages.starNotification("facebook/react", -2, 229998)).toBe(
+      [
+        "📉 <b>Stars lost</b>",
+        "",
+        '📦 <a href="https://github.com/facebook/react">facebook/react</a>',
+        "💔 \u22122 stars",
+        "⭐ 229,998 stars in total",
+      ].join("\n"),
+    );
+  });
+
+  it("headlines a message by its changes: gains, losses, or both", () => {
+    const gain = { fullName: "a/b", change: 3, total: 10 };
+    const loss = { fullName: "c/d", change: -1, total: 5 };
+
+    expect(messages.starNotifications([gain, gain])).toMatch(/^🌟 <b>New stars!<\/b>/);
+    expect(messages.starNotifications([loss, loss])).toMatch(/^📉 <b>Stars lost<\/b>/);
+    expect(messages.starNotifications([gain, loss])).toMatch(/^⭐ <b>Star changes<\/b>/);
+    expect(messages.starNotifications([gain, loss])).toContain("\u22121 (⭐ 5)");
+  });
+
   it("formats the star notification", () => {
     expect(messages.starNotification("facebook/react", 1, 230000)).toBe(
       [

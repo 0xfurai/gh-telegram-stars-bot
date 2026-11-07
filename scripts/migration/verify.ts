@@ -80,12 +80,17 @@ function starsMustMatch(mode: CopyMode): boolean {
   }
 }
 
+/**
+ * After a full copy, every subscription starts at its repository's count, so
+ * nothing is due. (Later, either way is normal: gains and losses are both
+ * notified.)
+ */
 function compareNotified(d1: D1Snapshot): string[] {
   const stars = new Map(d1.repositories.map((repo) => [repo.id, repo.stars_count]));
   return d1.subscriptions.flatMap((sub) => {
     const count = stars.get(sub.repository_id) ?? 0;
-    return sub.last_notified_stars > count
-      ? [`chat ${sub.chat_id}, repository ${sub.repository_id}: last notified ${sub.last_notified_stars}, above its ${count} stars`]
+    return sub.last_notified_stars !== count
+      ? [`chat ${sub.chat_id}, repository ${sub.repository_id}: last notified ${sub.last_notified_stars}, not its ${count} stars`]
       : [];
   });
 }
@@ -112,7 +117,6 @@ export function compareCopies(
     ...compareCounts(source, d1),
     ...compareChats(source, d1),
     ...compareRepositories(source, d1, options.mode),
-    ...compareNotified(d1),
-    ...(starsMustMatch(options.mode) ? compareGains(source, d1, options.today) : []),
+    ...(starsMustMatch(options.mode) ? [...compareNotified(d1), ...compareGains(source, d1, options.today)] : []),
   ];
 }

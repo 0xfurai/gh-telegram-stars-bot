@@ -46,7 +46,7 @@ export function welcome(): string {
   return [
     "🌟 <b>Welcome to GitHub Stars Bot!</b>",
     "",
-    "I'll tell you when your favorite GitHub repositories get new stars.",
+    "I'll tell you when your favorite GitHub repositories gain or lose stars.",
     "",
     "<b>Commands:</b>",
     COMMAND_LINES,
@@ -121,7 +121,7 @@ export function subscribed(repo: Repository): string {
     ...(repo.description ? [`📝 ${html(repo.description)}`] : []),
     ...(repo.isArchived ? ["📦 This repository is archived."] : []),
     "",
-    "I'll tell you when it gets new stars.",
+    "I'll tell you when it gains or loses stars.",
   ].join("\n");
 }
 
@@ -179,14 +179,27 @@ export function unknownCommand(): string {
 }
 
 /** The star notification. `gained` is the change since this chat was last told. */
-export function starNotification(fullName: string, gained: number, total: number): string {
-  return [
-    "🌟 <b>New stars!</b>",
-    "",
-    `📦 ${repositoryLink(fullName)}`,
-    `✨ +${count(gained, "new star")}`,
-    `⭐ ${count(total, "star")} in total`,
-  ].join("\n");
+/** "+5" or "−2", with a real minus sign. */
+function signed(change: number): string {
+  return change > 0 ? `+${number(change)}` : `\u2212${number(-change)}`;
+}
+
+/** The heading for a set of changes: gains, losses, or both. */
+function changeHeading(changes: readonly number[]): string {
+  const gains = changes.some((change) => change > 0);
+  const losses = changes.some((change) => change < 0);
+  if (gains && losses) {
+    return "⭐ <b>Star changes</b>";
+  }
+  return losses ? "📉 <b>Stars lost</b>" : "🌟 <b>New stars!</b>";
+}
+
+/** One repository's change since the chat was last told: positive for gains, negative for losses. */
+export function starNotification(fullName: string, change: number, total: number): string {
+  const line = change > 0 ? `✨ +${count(change, "new star")}` : `💔 \u2212${count(-change, "star")}`;
+  return [changeHeading([change]), "", `📦 ${repositoryLink(fullName)}`, line, `⭐ ${count(total, "star")} in total`].join(
+    "\n",
+  );
 }
 
 export function plainTextHint(): string {
@@ -195,8 +208,8 @@ export function plainTextHint(): string {
 
 export interface StarUpdate {
   fullName: string;
-  /** Stars gained since this chat was last told. */
-  gained: number;
+  /** Stars gained (positive) or lost (negative) since this chat was last told. */
+  change: number;
   total: number;
 }
 
@@ -214,11 +227,11 @@ export function starNotifications(updates: readonly StarUpdate[]): string {
   }
   const [only] = updates;
   if (updates.length === 1 && only) {
-    return starNotification(only.fullName, only.gained, only.total);
+    return starNotification(only.fullName, only.change, only.total);
   }
   return [
-    "🌟 <b>New stars!</b>",
+    changeHeading(updates.map((u) => u.change)),
     "",
-    ...updates.map((u) => `📦 ${repositoryLink(u.fullName)}: +${number(u.gained)} (⭐ ${number(u.total)})`),
+    ...updates.map((u) => `📦 ${repositoryLink(u.fullName)}: ${signed(u.change)} (⭐ ${number(u.total)})`),
   ].join("\n");
 }

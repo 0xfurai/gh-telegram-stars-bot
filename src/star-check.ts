@@ -133,7 +133,7 @@ function messageFor(delivery: Delivery): string {
   return starNotifications(
     delivery.items.map((item) => ({
       fullName: item.fullName,
-      gained: item.starsCount - item.lastNotifiedStars,
+      change: item.starsCount - item.lastNotifiedStars,
       total: item.starsCount,
     })),
   );

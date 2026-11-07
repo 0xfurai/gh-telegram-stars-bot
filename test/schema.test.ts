@@ -74,6 +74,7 @@ describe("schema", () => {
       { type: "table", name: "chats" },
       { type: "table", name: "daily_star_gains" },
       { type: "table", name: "repositories" },
+      { type: "table", name: "star_check_runs" },
       { type: "table", name: "star_check_state" },
     ]);
   });

@@ -124,6 +124,20 @@ Every run logs a `"Star check finished"` summary.
 
 Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
 
+## Monitoring
+
+* **Run log.** Every star check run is saved in `star_check_runs` (kept 7 days), with its summary as JSON.
+* **Failed runs.** A run fails when it throws (for example D1 is down) or GitHub couldn't be checked. Failed sends don't count: they're retried.
+  * A failed run also fails the Cron Trigger invocation, so Cloudflare shows it.
+  * It messages `ADMIN_CHAT_ID`, at most once an hour.
+* **`GET /health/star-check`** answers 503 when the last successful run is more than 15 minutes old, or there hasn't been one yet. Point an uptime monitor (UptimeRobot, Better Stack) at it, checking every 5 minutes.
+* **`GET /health`** only checks that the Worker runs with valid settings. `telegram:setup` uses it.
+
+```sh
+bunx wrangler d1 execute DB --remote --command \
+  "SELECT scheduled_at, ok, summary FROM star_check_runs ORDER BY id DESC LIMIT 5"
+```
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

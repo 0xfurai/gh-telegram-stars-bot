@@ -5,6 +5,7 @@ export const TEST_SETTINGS = {
   GITHUB_TOKEN: "ghp_test0123456789",
   WEBHOOK_SECRET: "test-webhook-secret-0123456789abcdef",
   NOTIFICATIONS: "dry-run",
+  ENVIRONMENT: "production",
   BOT_INFO: JSON.stringify({
     id: 123456789,
     is_bot: true,

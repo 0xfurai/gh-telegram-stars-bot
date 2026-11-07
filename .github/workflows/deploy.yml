@@ -16,52 +16,72 @@ permissions:
 
 jobs:
   deploy:
+    # Ephemeral runner pods (see check.yml): nothing from an earlier job,
+    # such as a fork's pull request, is on the machine.
     runs-on: nexus-runner
     timeout-minutes: 15
-    # The environment holds the Cloudflare token (secret CLOUDFLARE_API_TOKEN)
-    # and the chat IDs (variables ALLOWED_CHAT_IDS, ADMIN_CHAT_ID). Only jobs
-    # that name it get them, and its branch rule allows main only.
-    environment: ${{ inputs.environment }}
+    # The GitHub environment holds, for this environment only:
+    #   secrets   CLOUDFLARE_API_TOKEN, ALLOWED_CHAT_IDS, ADMIN_CHAT_ID
+    #             (chat IDs are personal data: secrets are masked in logs)
+    #   variable  WORKER_URL, for the health check below
+    # Only jobs that name the environment get them, and its branch rule
+    # allows main only.
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.WORKER_URL }}
     concurrency:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      TARGET: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
+      # No tokens in the environment while packages install.
+      - uses: ./.github/actions/setup
 
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - run: bun install --frozen-lockfile
+      # Production is wrangler.jsonc's top level, staging is env.staging.
+      - name: Select the wrangler environment
+        env:
+          TARGET: ${{ inputs.environment }}
+        run: |
+          case "$TARGET" in
+            production) echo "WRANGLER_ENV=" >> "$GITHUB_ENV" ;;
+            staging) echo "WRANGLER_ENV=--env=staging" >> "$GITHUB_ENV" ;;
+            *) echo "Unknown environment: $TARGET" >&2; exit 1 ;;
+          esac
 
       # Migrations only add to the schema, so they go first: the running
       # version keeps working, and the new one finds its tables.
       - name: Apply D1 migrations
-        run: |
-          case "$TARGET" in
-            production) bunx wrangler d1 migrations apply DB --remote ;;
-            staging) bunx wrangler d1 migrations apply DB --remote --env staging ;;
-            *) echo "Unknown environment: $TARGET" >&2; exit 1 ;;
-          esac
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        # WRANGLER_ENV is unquoted on purpose: empty means no flag.
+        run: bunx wrangler d1 migrations apply DB --remote $WRANGLER_ENV
 
       - name: Deploy the Worker
         env:
-          ALLOWED_CHAT_IDS: ${{ vars.ALLOWED_CHAT_IDS }}
-          ADMIN_CHAT_ID: ${{ vars.ADMIN_CHAT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ALLOWED_CHAT_IDS: ${{ secrets.ALLOWED_CHAT_IDS }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
         run: |
-          case "$TARGET" in
-            production) env_args=() ;;
-            staging) env_args=(--env staging) ;;
-            *) echo "Unknown environment: $TARGET" >&2; exit 1 ;;
-          esac
-          bunx wrangler deploy "${env_args[@]}" \
+          bunx wrangler deploy $WRANGLER_ENV \
             --var "ALLOWED_CHAT_IDS:${ALLOWED_CHAT_IDS}" \
             --var "ADMIN_CHAT_ID:${ADMIN_CHAT_ID}" \
             --message "Commit ${GITHUB_SHA}"
+
+      # /health answers 503 when a setting is missing or invalid (a missing
+      # chat ID secret, say), so a broken deploy fails here instead of
+      # going green. Roll back with `wrangler rollback` (README).
+      - name: Check the deployed Worker's settings
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
+        run: |
+          test -n "$WORKER_URL" || { echo "Set the WORKER_URL variable of this environment" >&2; exit 1; }
+          for attempt in 1 2 3 4 5 6; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "$WORKER_URL/health")
+            if [ "$status" = 200 ]; then echo "Healthy"; exit 0; fi
+            echo "Attempt $attempt: /health answered $status"; sleep 10
+          done
+          echo "The Worker isn't healthy: its logs list the invalid settings (never their values)." >&2
+          exit 1

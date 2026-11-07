@@ -10,6 +10,10 @@ GITHUB_TOKEN=<github-token>
 # 32-256 characters of A-Z, a-z, 0-9, _ or -. Generate one: openssl rand -hex 32
 WEBHOOK_SECRET=<output-of-openssl-rand-hex-32>
 
+# production or staging, set per environment in wrangler.jsonc. Staging
+# requires ALLOWED_CHAT_IDS, and ADMIN_CHAT_ID (if set) must be in it.
+# ENVIRONMENT=staging
+
 # on, dry-run or off. Locally, dry-run logs notifications without sending them.
 NOTIFICATIONS=dry-run
 
@@ -20,4 +24,4 @@ BOT_INFO=<getMe-result-json>
 # Optional overrides of the defaults in wrangler.jsonc:
 # ALLOWED_CHAT_IDS=<comma-separated-chat-ids>
 # ADMIN_CHAT_ID=<chat-id-for-failed-run-alerts>
-# ENVIRONMENT=<production or staging; staging requires ALLOWED_CHAT_IDS>
+

@@ -1,0 +1,17 @@
+name: Set up Node, Bun and packages
+description: Node 24 (from .nvmrc) runs the tools; Bun installs packages and runs the scripts.
+runs:
+  using: composite
+  steps:
+    # Pinned to commits, not tags: a moved tag would run new code on our runner.
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: .nvmrc
+
+    # The Bun version comes from "packageManager" in package.json.
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+    # Runs install scripts of trustedDependencies only. No secrets in this
+    # step's environment: callers pass tokens to the steps that need them.
+    - run: bun install --frozen-lockfile
+      shell: bash

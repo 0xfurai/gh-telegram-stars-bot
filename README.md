@@ -188,12 +188,15 @@ Repositories that are gone from GitHub, or private, are stored without a node ID
 | Bot | a test bot, never the production one | the production bot |
 | Deployed | on every push to `main`, after the checks pass | by hand: Actions → **Deploy to production** → Run workflow on `main`, then approve |
 
-Both run `.github/workflows/deploy.yml`: apply D1 migrations, then `wrangler deploy` with the commit SHA as the version message. Nobody deploys from a laptop.
+Both run `.github/workflows/deploy.yml`: apply D1 migrations, `wrangler deploy` with the commit SHA as the version message, then check that `/health` answers 200 (a missing or invalid setting makes it 503, and fails the deploy). Nobody deploys from a laptop.
 
 * **Settings.** Secrets are set per environment: `bunx wrangler secret put <NAME> --env staging` (leave out `--env` for production).
-* **Chat IDs.** They are personal data, and this repo is public, so `ALLOWED_CHAT_IDS` and `ADMIN_CHAT_ID` aren't in `wrangler.jsonc`. They are variables of the GitHub environments (Settings → Environments), passed to `wrangler deploy --var`.
-* **Staging only messages allowed chats.** It holds a copy of production data during the rehearsal. With `ENVIRONMENT=staging` and no `ALLOWED_CHAT_IDS`, the settings are invalid and the Worker answers 503.
-* **GitHub environments.** Each holds the `CLOUDFLARE_API_TOKEN` secret and accepts deploys from `main` only. `production` also requires an approval.
+* **Chat IDs.** They are personal data, and this repo and its Actions logs are public, so `ALLOWED_CHAT_IDS` and `ADMIN_CHAT_ID` aren't in `wrangler.jsonc`. They are secrets of the GitHub environments (masked in logs), passed to `wrangler deploy --var`.
+* **Staging only messages allowed chats.** It holds a copy of production data during the rehearsal. With `ENVIRONMENT=staging`, the settings are invalid (and the Worker answers 503) unless `ALLOWED_CHAT_IDS` is set and contains `ADMIN_CHAT_ID`. `ENVIRONMENT` has no default, so a missing one fails too instead of counting as production. Admin alerts name the environment.
+* **Staging checks GitHub on the same schedule as production**, so the rehearsal behaves like the real thing. That's about 120 GraphQL points an hour per environment, out of 5,000; give staging its own token anyway.
+* **GitHub environments** (Settings → Environments) accept deploys from `main` only; `production` also requires an approval. Each has:
+  * secrets `CLOUDFLARE_API_TOKEN`, `ADMIN_CHAT_ID`, and for staging `ALLOWED_CHAT_IDS`
+  * variable `WORKER_URL`, for the health check
 
 ### Undoing a bad deploy
 
@@ -206,7 +209,7 @@ A rollback restores the previous code in seconds. It doesn't touch D1 or secrets
 
 ## CI
 
-GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.
+GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. Its runners are ephemeral: each job gets a fresh pod, so nothing a pull request's job does is left behind for a deploy job. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.
 
 ## Migration plan
 

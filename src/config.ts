@@ -102,7 +102,11 @@ const settingsShape = {
   MAX_REPOS_PER_CHAT: z.pipe(z.optional(z.string()), z.transform(parseMaxRepos)),
   ALLOWED_CHAT_IDS: z.pipe(z.optional(z.string()), z.transform(parseChatIdList)),
   ADMIN_CHAT_ID: z.pipe(z.optional(z.string()), z.transform(parseOptionalChatId)),
-  ENVIRONMENT: z._default(z.enum(ENVIRONMENTS, { error: "must be production or staging" }), "production"),
+  // No default: the staging guard below must fail closed, never fall back to production.
+  ENVIRONMENT: z.enum(ENVIRONMENTS, {
+    error: (issue) =>
+      issue.input === undefined ? "is required: production or staging" : "must be production or staging",
+  }),
 };
 
 type Settings = z.output<z.ZodMiniObject<typeof settingsShape>>;
@@ -117,10 +121,16 @@ function checkBotMatchesToken(settings: Settings, ctx: z.core.$RefinementCtx<Set
 }
 
 // Staging holds a copy of production data during the rehearsal: its bot must
-// never message anyone outside the allowlist, so an empty one is an error.
+// never message anyone outside the allowlist, admin alerts included.
 function checkStagingIsRestricted(settings: Settings, ctx: z.core.$RefinementCtx<Settings>): void {
-  if (settings.ENVIRONMENT === "staging" && settings.ALLOWED_CHAT_IDS === null) {
+  if (settings.ENVIRONMENT !== "staging") {
+    return;
+  }
+  const allowed = settings.ALLOWED_CHAT_IDS;
+  if (allowed === null) {
     ctx.addIssue({ code: "custom", path: ["ALLOWED_CHAT_IDS"], message: "is required in staging" });
+  } else if (settings.ADMIN_CHAT_ID !== null && !allowed.has(settings.ADMIN_CHAT_ID)) {
+    ctx.addIssue({ code: "custom", path: ["ADMIN_CHAT_ID"], message: "must be in ALLOWED_CHAT_IDS in staging" });
   }
 }
 
@@ -137,6 +147,7 @@ function toAppConfig(settings: Settings) {
     allowedChatIds: settings.ALLOWED_CHAT_IDS,
     /** Where failed-run alerts go. null turns the alerts off. */
     adminChatId: settings.ADMIN_CHAT_ID,
+    /** Shown in admin alerts, so a staging alert isn't mistaken for production. */
     environment: settings.ENVIRONMENT,
   };
 }

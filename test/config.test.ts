@@ -80,8 +80,19 @@ describe("parseConfig", () => {
     });
   });
 
-  it("rejects an unknown ENVIRONMENT", () => {
+  it("rejects a missing or unknown ENVIRONMENT, instead of falling back to production", () => {
     expect(errorsOf(parse({ ENVIRONMENT: "prod" }))).toEqual(["ENVIRONMENT must be production or staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: undefined }))).toEqual(["ENVIRONMENT is required: production or staging"]);
+    expect(errorsOf(parse({ ENVIRONMENT: " " }))).toEqual(["ENVIRONMENT is required: production or staging"]);
+  });
+
+  it("requires the staging admin chat to be in the allowlist", () => {
+    expect(errorsOf(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42", ADMIN_CHAT_ID: "7" }))).toEqual([
+      "ADMIN_CHAT_ID must be in ALLOWED_CHAT_IDS in staging",
+    ]);
+    expect(parse({ ENVIRONMENT: "staging", ALLOWED_CHAT_IDS: "42,7", ADMIN_CHAT_ID: "7" }).ok).toBe(true);
+    // Production has no allowlist to check against.
+    expect(parse({ ADMIN_CHAT_ID: "7" }).ok).toBe(true);
   });
 
   it("treats an empty ALLOWED_CHAT_IDS as no restriction", () => {

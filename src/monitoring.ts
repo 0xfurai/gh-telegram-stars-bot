@@ -165,7 +165,7 @@ export async function alertAdmin(
     default:
       return assertNever(slot);
   }
-  const text = `⚠️ <b>Star check problem</b>\n\n${html(reason)}\n\nFurther alerts in the next hour are held back.`;
+  const text = `⚠️ <b>Star check problem (${config.environment})</b>\n\n${html(reason)}\n\nFurther alerts in the next hour are held back.`;
   const sent = await sendAlert(config, deps, adminChatId, text);
   if (!sent.ok) {
     console.error(JSON.stringify({ message: "Admin alert not delivered", error: sent.error }));

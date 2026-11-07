@@ -38,15 +38,18 @@ export function testConfig(overrides: Record<string, string> = {}): AppConfig {
 
 let updateId = 1000;
 
-/** A private-chat message update; text starting with "/" gets a command entity. */
-export function messageUpdate(text: string, chatId = 1) {
+/** A message update; text starting with "/" gets a command entity. */
+export function messageUpdate(text: string, chatId = 1, chatType: "private" | "group" = "private") {
   const firstWord = text.split(/\s/)[0] ?? "";
   return {
     update_id: ++updateId,
     message: {
       message_id: updateId,
       date: 1_700_000_000,
-      chat: { id: chatId, type: "private", first_name: "User" },
+      chat:
+        chatType === "private"
+          ? { id: chatId, type: chatType, first_name: "User" }
+          : { id: chatId, type: chatType, title: "Group" },
       from: { id: chatId, is_bot: false, first_name: "User" },
       text,
       ...(text.startsWith("/")

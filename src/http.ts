@@ -1,8 +1,8 @@
 import { webhookCallback } from "grammy";
-import { createBot, type BotOptions } from "./bot";
+import { createBot, type BotDeps } from "./bot";
 import type { AppConfig } from "./config";
 
-export interface RequestContext extends BotOptions {
+export interface RequestContext extends BotDeps {
   config: AppConfig;
 }
 
@@ -16,8 +16,9 @@ type WebhookHandler = (request: Request) => Promise<Response>;
 // than one handled twice.
 const WEBHOOK_TIMEOUT_MS = 20_000;
 
-// One bot per isolate and Telegram fetch: settings don't change while the
-// isolate lives. Keyed by fetch too, so tests use this same cached path.
+// One bot per isolate and Telegram fetch: settings and bindings don't change
+// while the isolate lives, so the other deps are the same for a given config.
+// Keyed by fetch too, so tests use this same cached path.
 const webhooks = new WeakMap<AppConfig, WeakMap<object, WebhookHandler>>();
 const DEFAULT_FETCH_KEY = {};
 

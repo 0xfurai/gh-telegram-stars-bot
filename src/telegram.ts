@@ -4,7 +4,7 @@
 // blocked the bot (403), the chat is gone, or we're sending too fast (429).
 // send() turns those into a SendError the caller can act on (deactivate the
 // chat, stop the run). Anything else is rethrown.
-import { GrammyError, HttpError } from "grammy";
+import { type Context, GrammyError, HttpError } from "grammy";
 import { err, ok, type Result } from "./result";
 
 export type SendError =
@@ -56,5 +56,20 @@ export async function send<T>(call: () => Promise<T>): Promise<Result<T, SendErr
       throw error;
     }
     return err(sendError);
+  }
+}
+
+export interface ReplyOptions {
+  /** Show a link preview for the first link (default: no preview). */
+  preview?: boolean;
+}
+
+/** Replies in HTML mode, logging (not throwing) when Telegram refuses the message. */
+export async function replyHtml(ctx: Context, text: string, options: ReplyOptions = {}): Promise<void> {
+  const sent = await send(() =>
+    ctx.reply(text, { parse_mode: "HTML", link_preview_options: { is_disabled: !options.preview } }),
+  );
+  if (!sent.ok) {
+    console.warn(JSON.stringify({ message: "Reply not sent", chatId: ctx.chat?.id, error: sent.error }));
   }
 }

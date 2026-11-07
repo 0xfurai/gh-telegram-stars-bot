@@ -1,40 +1,25 @@
 import { Bot, type BotError, type Context, type MiddlewareFn } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { COMMANDS, type CommandName } from "./command-list";
+import { createCommandHandlers, handlePlainText, type CommandHandler } from "./commands";
 import type { AppConfig } from "./config";
-import { send } from "./telegram";
+import { ensureChat } from "./db";
+import * as messages from "./messages";
+import { replyHtml } from "./telegram";
 
-/** A command handler. `args` is the text after the command, trimmed. */
-export type CommandHandler = (ctx: Context, args: string) => Promise<void>;
+export type { CommandHandler } from "./commands";
 
-export interface BotOptions {
+export interface BotDeps {
+  db: D1Database;
   /** Replaces fetch for Telegram API calls. */
   telegramFetch?: typeof fetch;
+  /** Replaces fetch for GitHub API calls. */
+  githubFetch?: typeof fetch;
   /** Replaces individual command handlers. */
   commandHandlers?: Partial<Record<CommandName, CommandHandler>>;
+  /** The current time (tests). */
+  now?: () => Date;
 }
-
-/** Replies, logging (not throwing) when Telegram refuses the message. */
-export async function reply(ctx: Context, text: string): Promise<void> {
-  const sent = await send(() => ctx.reply(text));
-  if (!sent.ok) {
-    console.warn(JSON.stringify({ message: "Reply not sent", chatId: ctx.chat?.id, error: sent.error }));
-  }
-}
-
-// Placeholder replies until the commands are ported (GSB-8).
-const notPortedYet: CommandHandler = (ctx) => reply(ctx, "This command is being rebuilt and will be back soon.");
-
-const DEFAULT_HANDLERS: Record<CommandName, CommandHandler> = {
-  start: notPortedYet,
-  help: notPortedYet,
-  add: notPortedYet,
-  list: notPortedYet,
-  remove: notPortedYet,
-  stats: notPortedYet,
-};
-
-const UNKNOWN_COMMAND = "Unknown command. Type /help to see the available commands.";
 
 export interface ParsedCommand {
   /** Lowercased, without the @BotName suffix. */
@@ -66,17 +51,52 @@ function isCommandName(name: string): name is CommandName {
   return COMMANDS.some((command) => command.command === name);
 }
 
-function dispatcher(handlers: Record<CommandName, CommandHandler>): MiddlewareFn {
+function startsWithCommand(entities: MessageEntity[] | undefined): boolean {
+  return entities?.some((e) => e.type === "bot_command" && e.offset === 0) ?? false;
+}
+
+type Action = () => Promise<void>;
+
+/**
+ * What a message asks the bot to do, or null when it's not for the bot:
+ * group chatter, or a command for another bot.
+ */
+function actionFor(ctx: Context, text: string, handlers: Record<CommandName, CommandHandler>): Action | null {
+  const message = ctx.message;
+  const command = message ? parseCommand(message, ctx.me.username) : null;
+  if (command !== null) {
+    const handler = isCommandName(command.name) ? handlers[command.name] : null;
+    return handler ? () => handler(ctx, command.args) : () => replyHtml(ctx, messages.unknownCommand());
+  }
+  if (startsWithCommand(message?.entities) || ctx.chat?.type !== "private") {
+    return null;
+  }
+  return () => handlePlainText(ctx, text, handlers);
+}
+
+/**
+ * A message the bot acts on means it can reach the chat: create or reactivate
+ * it. If D1 is down, log it and still answer.
+ */
+async function trackChat(db: D1Database, chatId: number): Promise<void> {
+  try {
+    await ensureChat(db, chatId);
+  } catch (error) {
+    console.error(
+      JSON.stringify({ message: "Chat not tracked", chatId, error: error instanceof Error ? error.message : String(error) }),
+    );
+  }
+}
+
+function dispatcher(db: D1Database, handlers: Record<CommandName, CommandHandler>): MiddlewareFn {
   return async (ctx) => {
-    const command = ctx.message ? parseCommand(ctx.message, ctx.me.username) : null;
-    if (command === null) {
+    const text = ctx.message?.text;
+    const action = text === undefined ? null : actionFor(ctx, text, handlers);
+    if (action === null || ctx.chat === undefined) {
       return;
     }
-    if (isCommandName(command.name)) {
-      await handlers[command.name](ctx, command.args);
-    } else {
-      await reply(ctx, UNKNOWN_COMMAND);
-    }
+    await trackChat(db, ctx.chat.id);
+    await action();
   };
 }
 
@@ -99,19 +119,29 @@ function logUpdateError(error: BotError): void {
   );
 }
 
-export function createBot(config: AppConfig, options: BotOptions = {}): Bot {
+export function createBot(config: AppConfig, deps: BotDeps): Bot {
   const bot = new Bot(config.telegramBotToken, {
     // Validated in config.ts; getMe fields added in later Bot API versions
     // pass through unchanged.
     botInfo: config.botInfo as unknown as UserFromGetMe,
-    client: options.telegramFetch ? { fetch: options.telegramFetch } : {},
+    client: deps.telegramFetch ? { fetch: deps.telegramFetch } : {},
   });
+
+  const handlers = {
+    ...createCommandHandlers({
+      config,
+      db: deps.db,
+      github: { token: config.githubToken, fetch: deps.githubFetch },
+      now: deps.now,
+    }),
+    ...deps.commandHandlers,
+  };
 
   // One failed update must never affect others: log it and answer 200, so
   // Telegram doesn't redeliver it. (bot.catch only applies to long polling;
   // with webhooks, errors need an error boundary around the handlers.)
-  const handlers = bot.errorBoundary(logUpdateError);
-  handlers.use(allowedChatsOnly(config.allowedChatIds));
-  handlers.on("message:text", dispatcher({ ...DEFAULT_HANDLERS, ...options.commandHandlers }));
+  const guarded = bot.errorBoundary(logUpdateError);
+  guarded.use(allowedChatsOnly(config.allowedChatIds));
+  guarded.on("message:text", dispatcher(deps.db, handlers));
   return bot;
 }

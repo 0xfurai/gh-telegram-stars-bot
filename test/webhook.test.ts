@@ -1,6 +1,8 @@
+import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BotOptions } from "../src/bot";
+import type { BotDeps } from "../src/bot";
 import { handleFetch } from "../src/http";
+import * as messages from "../src/messages";
 import { TEST_SETTINGS } from "./settings";
 import { fakeTelegram, messageUpdate, testConfig, webhookRequest } from "./telegram";
 
@@ -8,7 +10,7 @@ interface DeliverOptions {
   allowed?: string;
   fail?: boolean;
   secret?: string | null;
-  commandHandlers?: BotOptions["commandHandlers"];
+  commandHandlers?: BotDeps["commandHandlers"];
 }
 
 async function deliver(update: unknown, options: DeliverOptions = {}) {
@@ -16,6 +18,7 @@ async function deliver(update: unknown, options: DeliverOptions = {}) {
   const config = testConfig(options.allowed ? { ALLOWED_CHAT_IDS: options.allowed } : {});
   const response = await handleFetch(webhookRequest(update, options.secret), {
     config,
+    db: env.DB,
     telegramFetch: telegram.fetch,
     commandHandlers: options.commandHandlers,
   });
@@ -29,7 +32,7 @@ function sentTexts(calls: { method: string; body: Record<string, unknown> }[]): 
 /** Records the arguments of each /add call. */
 function recordingAdd() {
   const args: string[] = [];
-  const handlers: BotOptions["commandHandlers"] = {
+  const handlers: BotDeps["commandHandlers"] = {
     add: (_ctx, commandArgs) => {
       args.push(commandArgs);
       return Promise.resolve();
@@ -53,7 +56,7 @@ describe("POST /webhook: access", () => {
   });
 
   it("only accepts POST", async () => {
-    const response = await handleFetch(new Request("https://bot.test/webhook"), { config: testConfig() });
+    const response = await handleFetch(new Request("https://bot.test/webhook"), { config: testConfig(), db: env.DB });
 
     expect(response.status).toBe(405);
     expect(response.headers.get("allow")).toBe("POST");
@@ -140,7 +143,35 @@ describe("POST /webhook: commands", () => {
 
     const { calls } = await deliver(update);
 
-    expect(calls).toEqual([]);
+    // Plain text in a private chat gets the hint, not /help.
+    expect(sentTexts(calls)).toEqual([messages.plainTextHint()]);
+  });
+});
+
+describe("bot cache", () => {
+  it("reuses the bot for the same deps and rebuilds it when one differs", async () => {
+    const config = testConfig();
+    const telegram = fakeTelegram();
+    const calls: string[] = [];
+    const handlersFor = (name: string): BotDeps["commandHandlers"] => ({
+      add: () => {
+        calls.push(name);
+        return Promise.resolve();
+      },
+    });
+    const first = handlersFor("first");
+    const second = handlersFor("second");
+
+    for (const commandHandlers of [first, first, second]) {
+      await handleFetch(webhookRequest(messageUpdate("/add x")), {
+        config,
+        db: env.DB,
+        telegramFetch: telegram.fetch,
+        commandHandlers,
+      });
+    }
+
+    expect(calls).toEqual(["first", "first", "second"]);
   });
 });
 
@@ -177,7 +208,11 @@ describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", ()
       body: "{not json",
     });
 
-    const response = await handleFetch(request, { config: testConfig(), telegramFetch: fakeTelegram().fetch });
+    const response = await handleFetch(request, {
+      config: testConfig(),
+      db: env.DB,
+      telegramFetch: fakeTelegram().fetch,
+    });
 
     expect(response.status).toBe(200);
     expect(String(error.mock.calls[0]?.[0])).toContain("Webhook request failed");

@@ -18,7 +18,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typegen:check": "wrangler types --check",
-    "telegram:setup": "node scripts/telegram-setup.ts"
+    "telegram:setup": "node scripts/telegram-setup.ts",
+    "migrate:copy": "node scripts/copy-to-d1.ts",
+    "migrate:verify": "node scripts/verify-copy.ts",
+    "migrate:copy-back": "node scripts/copy-back-to-supabase.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",

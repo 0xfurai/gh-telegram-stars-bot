@@ -171,3 +171,7 @@ supabase/
 !.dev.vars.example
 # Any env file (.env.legacy, .env.staging, ...): may hold secrets
 .env.*
+
+# Copy-script output and exports (contain chat IDs)
+d1-copy-*.sql
+supabase-export*

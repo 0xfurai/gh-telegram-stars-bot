@@ -8,6 +8,7 @@
   "engines": {
     "node": ">=24"
   },
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "dev": "wrangler dev",
     "dev:scheduled": "wrangler dev --test-scheduled",
@@ -15,7 +16,8 @@
     "typecheck": "tsc -p . && tsc -p test && tsc -p tsconfig.tools.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typegen:check": "wrangler types --check"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",
@@ -27,9 +29,8 @@
     "vitest": "4.1.12",
     "wrangler": "4.152.0"
   },
-  "allowScripts": {
-    "esbuild@0.28.2": true,
-    "workerd@1.20261019.1": true,
-    "fsevents": false
-  }
+  "trustedDependencies": [
+    "esbuild",
+    "workerd"
+  ]
 }

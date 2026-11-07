@@ -14,18 +14,23 @@ A Telegram bot that notifies subscribers about new stars on GitHub repositories.
 
 ## Development
 
-Requires Node.js 24 (see `.nvmrc`; run `nvm use`).
+Requires:
+
+* **Bun** for installing packages and running scripts. The version is in `packageManager` in `package.json`.
+* **Node.js 24** to run the tools (Wrangler, Vitest, ESLint, tsc). See `.nvmrc`; run `nvm use`.
 
 ```sh
-npm install
+bun install
 cp .dev.vars.example .dev.vars
-npm run dev            # local Worker on http://localhost:8787 (GET /health)
-npm run dev:scheduled  # same, plus GET /__scheduled to trigger the star check
-npm run typecheck
-npm run lint           # includes a complexity limit of 10 per function
-npm test               # Vitest inside the Workers runtime
-npm run typegen        # regenerate worker-configuration.d.ts after changing wrangler.jsonc
+bun run dev            # local Worker on http://localhost:8787 (GET /health)
+bun run dev:scheduled  # same, plus GET /__scheduled to trigger the star check
+bun run typecheck
+bun run lint           # includes a complexity limit of 10 per function
+bun run test           # Vitest inside the Workers runtime
+bun run typegen        # regenerate worker-configuration.d.ts after changing wrangler.jsonc
 ```
+
+Use `bun run test`, not `bun test`: `bun test` starts Bun's own test runner instead of Vitest.
 
 ### Local settings and secrets
 
@@ -35,10 +40,10 @@ npm run typegen        # regenerate worker-configuration.d.ts after changing wra
 
 ### Dependency install scripts
 
-npm only runs install scripts for packages listed in `allowScripts` in `package.json`. After bumping `wrangler`, approve the new `workerd` and `esbuild` versions:
+Bun only runs install scripts for packages listed in `trustedDependencies` in `package.json`: `esbuild` and `workerd`, which download native binaries. After adding a dependency, check that nothing else needs its scripts:
 
 ```sh
-npm install-scripts approve workerd esbuild
+bun pm untrusted
 ```
 
 ## CI

@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Our own branches run on the self-hosted runner. Pull requests from forks
+    # run on GitHub-hosted runners, so untrusted code never runs on our machine.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'nexus-runner' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 

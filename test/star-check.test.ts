@@ -453,7 +453,13 @@ describe("run safety", () => {
     await expect(run({ database: outage })).rejects.toThrow("load failed");
 
     expect(error.mock.calls.map((call) => String(call[0])).join(" ")).toContain("Star check lock not released");
-    await releaseStarCheckLock(db);
+    // The lock is still held; beforeEach clears it for the next test.
+  });
+
+  it("fails a successful run whose lock release fails, so it's recorded and alerted on", async () => {
+    await expect(run({ database: failingDb(db, /locked_until = NULL/, "release failed") })).rejects.toThrow(
+      "release failed",
+    );
   });
 
   it("stays within the subrequest budget with 1,000 repositories", async () => {

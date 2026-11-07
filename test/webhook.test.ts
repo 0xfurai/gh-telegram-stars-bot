@@ -4,6 +4,7 @@ import type { BotDeps } from "../src/bot";
 import { handleFetch } from "../src/http";
 import * as messages from "../src/messages";
 import { TEST_SETTINGS } from "./settings";
+import { replyHtml } from "../src/telegram";
 import { failingDb } from "./failing-db";
 import { fakeTelegram, messageUpdate, testConfig, webhookRequest } from "./telegram";
 
@@ -209,6 +210,21 @@ describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", ()
 
     expect(response.status).toBe(200);
     expect(sentTexts(calls)).toEqual([messages.somethingWentWrong()]);
+  });
+
+  it("adds no error reply when the handler already answered", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { calls } = await deliver(messageUpdate("/add x"), {
+      commandHandlers: {
+        add: async (ctx) => {
+          await replyHtml(ctx, "Page 1");
+          throw new Error("boom");
+        },
+      },
+    });
+
+    expect(sentTexts(calls)).toEqual(["Page 1"]);
   });
 
   it("logs, and still answers 200, when the error reply fails too", async () => {

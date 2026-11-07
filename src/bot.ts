@@ -6,7 +6,7 @@ import type { AppConfig } from "./config";
 import { ensureChat, markChatReachable, migrateChat, setChatActive } from "./db";
 import { assertNever } from "./result";
 import * as messages from "./messages";
-import { replyHtml } from "./telegram";
+import { hasReplied, replyHtml } from "./telegram";
 import { errorMessage } from "./errors";
 
 export type { CommandHandler } from "./commands";
@@ -135,8 +135,11 @@ async function onMembershipChange(db: D1Database, chatId: number, status: Member
 
 /**
  * Logs a failed update (a D1 outage, a bug) and tells the user, so a command
- * never goes unanswered. Only messages get the reply: membership updates
- * have nobody to answer. A reply that fails too is logged, never thrown.
+ * never goes unanswered. No error reply when the handler already answered
+ * (the user has a reply; an error after it would contradict it), or for
+ * membership updates (nobody to answer). replyHtml logs a refused reply;
+ * anything else it throws reaches handleWebhook, which logs it and still
+ * answers 200.
  */
 async function onUpdateError(error: BotError): Promise<void> {
   console.error(
@@ -146,13 +149,8 @@ async function onUpdateError(error: BotError): Promise<void> {
       error: errorMessage(error.error),
     }),
   );
-  if (error.ctx.message?.text === undefined) {
-    return;
-  }
-  try {
+  if (error.ctx.message?.text !== undefined && !hasReplied(error.ctx)) {
     await replyHtml(error.ctx, messages.somethingWentWrong());
-  } catch (replyError) {
-    console.error(JSON.stringify({ message: "Error reply not sent", updateId: error.ctx.update.update_id, error: errorMessage(replyError) }));
   }
 }
 

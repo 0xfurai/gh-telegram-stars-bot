@@ -72,12 +72,22 @@ export interface ReplyOptions {
   preview?: boolean;
 }
 
+/** Updates that got at least one reply delivered. */
+const answered = new WeakSet<object>();
+
+/** Whether replyHtml delivered a message for this update. */
+export function hasReplied(ctx: Context): boolean {
+  return answered.has(ctx.update);
+}
+
 /** Replies in HTML mode, logging (not throwing) when Telegram refuses the message. */
 export async function replyHtml(ctx: Context, text: string, options: ReplyOptions = {}): Promise<void> {
   const sent = await send(() =>
     ctx.reply(text, { parse_mode: "HTML", link_preview_options: { is_disabled: !options.preview } }),
   );
-  if (!sent.ok) {
+  if (sent.ok) {
+    answered.add(ctx.update);
+  } else {
     console.warn(JSON.stringify({ message: "Reply not sent", chatId: ctx.chat?.id, error: sent.error }));
   }
 }

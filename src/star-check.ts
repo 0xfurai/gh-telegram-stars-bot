@@ -439,13 +439,12 @@ async function checkAndSave(
   });
 }
 
-/** Runs one star check. Returns (and logs) the run summary. */
 /**
- * Releases the run lock, logging a failure instead of throwing it: in a
- * `finally`, a throw would replace the run's own error (likely the same
- * outage). The lock then expires by itself after LOCK_TTL_MS.
+ * Releases the lock after a failed run, logging (not throwing) a failed
+ * release, so the run's own error is the one reported. The lock then
+ * expires by itself after LOCK_TTL_MS.
  */
-async function releaseLock(db: D1Database): Promise<void> {
+async function releaseLockAfterFailure(db: D1Database): Promise<void> {
   try {
     await releaseStarCheckLock(db);
   } catch (error) {
@@ -455,6 +454,29 @@ async function releaseLock(db: D1Database): Promise<void> {
   }
 }
 
+/** The run itself, while holding the lock. */
+async function checkAndNotify(
+  controller: Pick<ScheduledController, "scheduledTime">,
+  config: AppConfig,
+  deps: StarCheckDeps,
+  limits: StarCheckLimits,
+  summary: RunSummary,
+): Promise<void> {
+  await checkAndSave(controller, config, deps, limits, summary);
+  const api = new Api(config.telegramBotToken, {
+    timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
+    ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
+  });
+  const sendCalls = await notify({ config, deps, api, summary, unreachable: new Set() }, limits);
+  summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
+  summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
+}
+
+/**
+ * Runs one star check. Returns (and logs) the run summary. A failed lock
+ * release after a successful run fails the run, so it's recorded and
+ * alerted on: the next runs would skip until the lock expires.
+ */
 export async function runStarCheck(
   controller: Pick<ScheduledController, "scheduledTime">,
   config: AppConfig,
@@ -470,17 +492,12 @@ export async function runStarCheck(
     return summary;
   }
   try {
-    await checkAndSave(controller, config, deps, limits, summary);
-    const api = new Api(config.telegramBotToken, {
-      timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
-      ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
-    });
-    const sendCalls = await notify({ config, deps, api, summary, unreachable: new Set() }, limits);
-    summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
-    summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
-  } finally {
-    await releaseLock(deps.db);
+    await checkAndNotify(controller, config, deps, limits, summary);
+  } catch (error) {
+    await releaseLockAfterFailure(deps.db);
+    throw error;
   }
+  await releaseStarCheckLock(deps.db);
 
   console.log(JSON.stringify({ message: "Star check finished", ...summary }));
   return summary;

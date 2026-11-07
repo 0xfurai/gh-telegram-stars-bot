@@ -1,7 +1,7 @@
 import { webhookCallback } from "grammy";
 import { createBot, type BotDeps } from "./bot";
 import type { AppConfig } from "./config";
-import { healthStatusCode, starCheckHealth } from "./monitoring";
+import { healthStatusCode, readStarCheckHealth } from "./monitoring";
 import { errorMessage } from "./errors";
 
 export interface RequestContext extends BotDeps {
@@ -82,13 +82,8 @@ async function handleWebhook(request: Request, context: RequestContext): Promise
  */
 async function handleStarCheckHealth(_request: Request, context: RequestContext): Promise<Response> {
   const now = context.now?.().getTime() ?? Date.now();
-  try {
-    const health = await starCheckHealth(context.db, now);
-    return Response.json(health, { status: healthStatusCode(health) });
-  } catch (error) {
-    console.error(JSON.stringify({ message: "Star check health unknown", error: errorMessage(error) }));
-    return Response.json({ status: "unknown" }, { status: 503 });
-  }
+  const health = await readStarCheckHealth(context.db, now);
+  return Response.json(health, { status: healthStatusCode(health) });
 }
 
 const ROUTES: Partial<Record<string, Methods>> = {

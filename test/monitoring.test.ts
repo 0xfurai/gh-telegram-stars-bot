@@ -99,11 +99,11 @@ describe("GET /health/star-check", () => {
 
     const response = await handleFetch(new Request("https://bot.test/health/star-check"), {
       config: testConfig(),
-      db: failingDb(db, /./),
+      db: failingDb(db, "everything"),
     });
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ status: "unknown" });
+    expect(await response.json()).toEqual({ status: "unknown", lastSuccessAt: null, lastRunOk: null });
     expect(String(error.mock.calls[0]?.[0])).toContain("Star check health unknown");
   });
 });
@@ -248,7 +248,7 @@ describe("handleScheduled", () => {
   });
 
   it("rethrows a crash with its original error, after recording it", async () => {
-    const crashing = failingDb(db, /./);
+    const crashing = failingDb(db, "everything");
     let thrown: unknown;
 
     try {
@@ -259,6 +259,20 @@ describe("handleScheduled", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toBe("D1 down");
+  });
+
+  it("alerts on a crash when D1 is down, though the health can't be read", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const telegram = fakeTelegram();
+
+    await expect(
+      handleScheduled({ scheduledTime: NOON }, testConfig({ ADMIN_CHAT_ID: "42" }), {
+        db: failingDb(db, "everything"),
+        telegramFetch: telegram.fetch,
+      }),
+    ).rejects.toThrow("D1 down");
+
+    expect(telegram.calls.filter((call) => call.method === "sendMessage")).toHaveLength(1);
   });
 
   it("doesn't record a run skipped because another run holds the lock", async () => {

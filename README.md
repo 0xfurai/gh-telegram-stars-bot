@@ -34,7 +34,8 @@ Use `bun run test`, not `bun test`: `bun test` starts Bun's own test runner inst
 
 ### Local settings and secrets
 
-* Local values go in `.dev.vars`. It's ignored by git; never commit it.
+* Local values go in `.dev.vars`. It's ignored by git; never commit it. `.dev.vars.example` lists every setting; use a test bot, never the production one.
+* Every setting is validated at startup (`src/config.ts`). With an invalid or missing setting, the Worker answers every request with 503, fails scheduled runs, and logs which settings are wrong (never their values). `NOTIFICATIONS` has no default on purpose.
 * Secret names are declared in `wrangler.jsonc` under `secrets.required`. Generated types come from that list, not from your local files, so CI and your machine always agree.
 * Wrangler falls back to a root `.env` when `.dev.vars` is missing. Keep a `.dev.vars` file, and don't keep a root `.env` in this repo.
 

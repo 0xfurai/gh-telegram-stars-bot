@@ -1,2 +1,21 @@
-# Copy to .dev.vars for local `wrangler dev` and tests. Never commit .dev.vars.
-# Secrets are added here as they are declared in wrangler.jsonc (GSB-3).
+# Copy to .dev.vars for local `wrangler dev`. Never commit .dev.vars.
+# Every value is validated at startup (src/config.ts). With invalid values the
+# Worker answers 503 and logs which settings are wrong.
+
+# Secrets. Use a test bot from BotFather for local work, never the production bot.
+TELEGRAM_BOT_TOKEN=123456789:replace-with-your-test-bot-token-xxxxxxxxxx
+GITHUB_TOKEN=replace-with-a-github-token
+# 32-256 characters of A-Z, a-z, 0-9, _ or -. Generate one: openssl rand -hex 32
+WEBHOOK_SECRET=replace-with-output-of-openssl-rand-hex-32-0000000000
+
+# on, dry-run or off. Locally, dry-run logs notifications without sending them.
+NOTIFICATIONS=dry-run
+
+# The bot's getMe result as JSON:
+#   curl -s https://api.telegram.org/bot<TOKEN>/getMe | jq -c .result
+BOT_INFO={"id":123456789,"is_bot":true,"first_name":"Test bot","username":"my_test_bot"}
+
+# Optional. Comma-separated chat IDs that may use the bot; empty means everyone.
+ALLOWED_CHAT_IDS=
+# Optional. Chat that receives failed-run alerts; empty turns alerts off.
+ADMIN_CHAT_ID=

@@ -6,6 +6,11 @@ const ROUTES: Partial<Record<string, Route>> = {
 
 const ALLOWED_METHODS = "GET, HEAD";
 
+/** Every request gets this while the Worker's settings are invalid. */
+export function misconfigured(): Response {
+  return Response.json({ error: "Service misconfigured" }, { status: 503 });
+}
+
 export function handleFetch(request: Request): Response {
   const route = ROUTES[new URL(request.url).pathname];
 

@@ -1,4 +1,4 @@
-import { createScheduledController } from "cloudflare:test";
+import { createScheduledController, env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as mainModule from "../src/index";
@@ -58,7 +58,7 @@ describe("scheduled", () => {
       cron: "*/5 * * * *",
     });
 
-    worker.scheduled(controller);
+    worker.scheduled(controller, env);
 
     expect(log).toHaveBeenCalledOnce();
     const entry: unknown = JSON.parse(String(log.mock.calls[0]?.[0]));

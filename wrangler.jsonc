@@ -5,9 +5,15 @@
   "compatibility_date": "2026-10-19",
   // Declared secrets. This list, not .dev.vars or .env, decides the secret
   // names in the generated types, so they don't depend on local files.
-  // Filled in by GSB-3.
+  // Set them with `wrangler secret put <NAME>`; locally, in .dev.vars.
   "secrets": {
-    "required": []
+    "required": ["TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN", "WEBHOOK_SECRET"]
+  },
+  // Plain settings. All settings are validated at startup (src/config.ts).
+  // NOTIFICATIONS, BOT_INFO, ADMIN_CHAT_ID and ALLOWED_CHAT_IDS are set per
+  // environment, not here: NOTIFICATIONS deliberately has no default.
+  "vars": {
+    "MAX_REPOS_PER_CHAT": "50"
   },
   "observability": {
     "enabled": true

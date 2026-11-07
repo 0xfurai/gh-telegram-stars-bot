@@ -440,6 +440,21 @@ async function checkAndSave(
 }
 
 /** Runs one star check. Returns (and logs) the run summary. */
+/**
+ * Releases the run lock, logging a failure instead of throwing it: in a
+ * `finally`, a throw would replace the run's own error (likely the same
+ * outage). The lock then expires by itself after LOCK_TTL_MS.
+ */
+async function releaseLock(db: D1Database): Promise<void> {
+  try {
+    await releaseStarCheckLock(db);
+  } catch (error) {
+    console.error(
+      JSON.stringify({ message: "Star check lock not released; it expires by itself", error: errorMessage(error) }),
+    );
+  }
+}
+
 export async function runStarCheck(
   controller: Pick<ScheduledController, "scheduledTime">,
   config: AppConfig,
@@ -464,7 +479,7 @@ export async function runStarCheck(
     summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
     summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
   } finally {
-    await releaseStarCheckLock(deps.db);
+    await releaseLock(deps.db);
   }
 
   console.log(JSON.stringify({ message: "Star check finished", ...summary }));

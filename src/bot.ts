@@ -133,14 +133,27 @@ async function onMembershipChange(db: D1Database, chatId: number, status: Member
   }
 }
 
-function logUpdateError(error: BotError): void {
+/**
+ * Logs a failed update (a D1 outage, a bug) and tells the user, so a command
+ * never goes unanswered. Only messages get the reply: membership updates
+ * have nobody to answer. A reply that fails too is logged, never thrown.
+ */
+async function onUpdateError(error: BotError): Promise<void> {
   console.error(
     JSON.stringify({
       message: "Update failed",
       updateId: error.ctx.update.update_id,
-      error: error.error instanceof Error ? error.error.message : String(error.error),
+      error: errorMessage(error.error),
     }),
   );
+  if (error.ctx.message?.text === undefined) {
+    return;
+  }
+  try {
+    await replyHtml(error.ctx, messages.somethingWentWrong());
+  } catch (replyError) {
+    console.error(JSON.stringify({ message: "Error reply not sent", updateId: error.ctx.update.update_id, error: errorMessage(replyError) }));
+  }
 }
 
 export function createBot(config: AppConfig, deps: BotDeps): Bot {
@@ -161,10 +174,10 @@ export function createBot(config: AppConfig, deps: BotDeps): Bot {
     ...deps.commandHandlers,
   };
 
-  // One failed update must never affect others: log it and answer 200, so
-  // Telegram doesn't redeliver it. (bot.catch only applies to long polling;
+  // One failed update must never affect others: log it, tell the user, and
+  // answer 200, so Telegram doesn't redeliver it. (bot.catch only applies to long polling;
   // with webhooks, errors need an error boundary around the handlers.)
-  const guarded = bot.errorBoundary(logUpdateError);
+  const guarded = bot.errorBoundary(onUpdateError);
   guarded.use(allowedChatsOnly(config.allowedChatIds));
   guarded.on("my_chat_member", (ctx) =>
     onMembershipChange(deps.db, ctx.myChatMember.chat.id, ctx.myChatMember.new_chat_member.status),

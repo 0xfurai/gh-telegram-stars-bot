@@ -77,12 +77,18 @@ async function handleWebhook(request: Request, context: RequestContext): Promise
 
 /**
  * For an uptime monitor: 503 when the last successful star check is more
- * than 15 minutes old. Reads D1 only; never calls GitHub or Telegram.
+ * than 15 minutes old, or when D1 can't be read (status "unknown"). Reads D1
+ * only; never calls GitHub or Telegram.
  */
 async function handleStarCheckHealth(_request: Request, context: RequestContext): Promise<Response> {
   const now = context.now?.().getTime() ?? Date.now();
-  const health = await starCheckHealth(context.db, now);
-  return Response.json(health, { status: healthStatusCode(health) });
+  try {
+    const health = await starCheckHealth(context.db, now);
+    return Response.json(health, { status: healthStatusCode(health) });
+  } catch (error) {
+    console.error(JSON.stringify({ message: "Star check health unknown", error: errorMessage(error) }));
+    return Response.json({ status: "unknown" }, { status: 503 });
+  }
 }
 
 const ROUTES: Partial<Record<string, Methods>> = {

@@ -86,7 +86,7 @@ Use the same token and secret as the Worker's secrets. The script:
 
 Every webhook request gets 200 once the secret checks out, so Telegram never redelivers an update:
 
-* A handler that throws is logged as `"Update failed"` with the update ID.
+* A handler that throws (a bug, a D1 outage) is logged as `"Update failed"` with the update ID, and the user gets "Something went wrong" instead of silence. Membership updates get no reply.
 * A reply Telegram refuses (blocked, rate-limited, chat gone) is logged as `"Reply not sent"` with the reason.
 * A body that isn't JSON is logged as `"Webhook request failed"`.
 * An update that takes over 20 seconds gets its 200 early.
@@ -113,7 +113,7 @@ Limits and safety:
   * GitHub gets up to 10 requests (1,000 repositories).
   * Messages get what's left, at most 20, at 2 subrequests each: the send, then one D1 batch marking it sent.
   * Everything else waits for the next run. The summary's `subrequests` field shows what a run used.
-* **Run lock.** Two runs never overlap. A run that finds the lock held skips. A crashed run's lock expires after 10 minutes.
+* **Run lock.** Two runs never overlap. A run that finds the lock held skips. A crashed run's lock expires after 10 minutes. If releasing the lock fails (D1 down), that's logged, and the run reports its own error rather than the release's.
 * **Telegram failures.**
   * A rate limit or outage stops sending for that run.
   * A message Telegram rejects (likely a bug on our side) is logged and dropped.
@@ -134,7 +134,7 @@ Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
   * Failed Telegram sends don't count: they're retried.
   * A crash is rethrown with its original error, so Cloudflare's logs show the stack.
   * If the alert can't be throttled (D1 down), it goes out anyway. If Telegram refuses it, the next failing run tries again.
-* **`GET /health/star-check`** answers 503 when the last successful run is more than 15 minutes old, or there hasn't been one yet. Point an uptime monitor (UptimeRobot, Better Stack) at it, checking every 5 minutes.
+* **`GET /health/star-check`** answers 503 when the last successful run is more than 15 minutes old, or there hasn't been one yet, or (`"status": "unknown"`) D1 can't be read. Point an uptime monitor (UptimeRobot, Better Stack) at it, checking every 5 minutes.
 * **`GET /health`** only checks that the Worker runs with valid settings. `telegram:setup` uses it.
 
 ```sh

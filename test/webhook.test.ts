@@ -4,6 +4,7 @@ import type { BotDeps } from "../src/bot";
 import { handleFetch } from "../src/http";
 import * as messages from "../src/messages";
 import { TEST_SETTINGS } from "./settings";
+import { failingDb } from "./failing-db";
 import { fakeTelegram, messageUpdate, testConfig, webhookRequest } from "./telegram";
 
 interface DeliverOptions {
@@ -11,6 +12,7 @@ interface DeliverOptions {
   fail?: boolean;
   secret?: string | null;
   commandHandlers?: BotDeps["commandHandlers"];
+  db?: D1Database;
 }
 
 async function deliver(update: unknown, options: DeliverOptions = {}) {
@@ -18,7 +20,7 @@ async function deliver(update: unknown, options: DeliverOptions = {}) {
   const config = testConfig(options.allowed ? { ALLOWED_CHAT_IDS: options.allowed } : {});
   const response = await handleFetch(webhookRequest(update, options.secret), {
     config,
-    db: env.DB,
+    db: options.db ?? env.DB,
     telegramFetch: telegram.fetch,
     commandHandlers: options.commandHandlers,
   });
@@ -200,6 +202,29 @@ describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", ()
     expect(typeof entry.updateId).toBe("number");
   });
 
+  it("tells the user when a command fails, for example on a D1 outage", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { response, calls } = await deliver(messageUpdate("/list"), { db: failingDb(env.DB, /chat_repositories/) });
+
+    expect(response.status).toBe(200);
+    expect(sentTexts(calls)).toEqual([messages.somethingWentWrong()]);
+  });
+
+  it("logs, and still answers 200, when the error reply fails too", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { response, calls } = await deliver(messageUpdate("/add x"), {
+      fail: true,
+      commandHandlers: { add: () => Promise.reject(new Error("boom")) },
+    });
+
+    expect(response.status).toBe(200);
+    expect(sentTexts(calls)).toEqual([messages.somethingWentWrong()]);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("Reply not sent");
+  });
+
   it("logs a request body that isn't JSON", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const request = new Request("https://bot.test/webhook", {
@@ -257,6 +282,15 @@ describe("POST /webhook: membership changes", () => {
 
     await deliver(membership(-32, "administrator"));
     expect(await isActive(-32)).toBe(1);
+  });
+
+  it("sends nothing when a membership update fails: there's nobody to answer", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { response, calls } = await deliver(membership(-34, "kicked"), { db: failingDb(env.DB, /is_active/) });
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([]);
   });
 
   it("moves a group's subscriptions when it becomes a supergroup", async () => {

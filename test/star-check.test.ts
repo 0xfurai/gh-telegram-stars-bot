@@ -2,8 +2,10 @@ import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { acquireStarCheckLock, getStarCheckCursor, releaseStarCheckLock } from "../src/db";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "../src/messages";
+import { handleFetch } from "../src/http";
 import {
   afterSendFailure,
+  deactivatesChat,
   groupDeliveries,
   isPruneRun,
   runStarCheck,
@@ -11,7 +13,7 @@ import {
   type StarCheckLimits,
 } from "../src/star-check";
 import type { SendError } from "../src/telegram";
-import { testConfig } from "./telegram";
+import { fakeTelegram as fakeBotApi, messageUpdate, testConfig, webhookRequest } from "./telegram";
 
 const db = env.DB;
 const NOON = Date.UTC(2026, 10, 7, 12, 0);
@@ -45,7 +47,7 @@ const githubFetch: typeof fetch = (_input, init) => {
   );
 };
 
-type TelegramReply = "ok" | "blocked" | "too-long" | "rate-limited" | "down";
+type TelegramReply = "ok" | "blocked" | "chat-not-found" | "too-long" | "rate-limited" | "down";
 
 interface Sent {
   chatId: number;
@@ -67,6 +69,8 @@ function fakeTelegram(replyFor: (chatId: number) => TelegramReply = () => "ok") 
       },
       blocked: () =>
         Response.json({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }, { status: 403 }),
+      "chat-not-found": () =>
+        Response.json({ ok: false, error_code: 400, description: "Bad Request: chat not found" }, { status: 400 }),
       "too-long": () =>
         Response.json({ ok: false, error_code: 400, description: "Bad Request: message is too long" }, { status: 400 }),
       "rate-limited": () =>
@@ -286,6 +290,85 @@ describe("star check", () => {
 
     expect(summary.repositoriesChecked).toBe(100);
     expect(await getStarCheckCursor(db)).toBe(100);
+  });
+});
+
+describe("chats that can't be reached", () => {
+  async function isActive(chatId: number) {
+    return db.prepare("SELECT is_active FROM chats WHERE id = ?").bind(chatId).first<number>("is_active");
+  }
+
+  beforeEach(async () => {
+    await addRepo(1, 100);
+    await subscribe(10, 1);
+    githubStars.set(1, 101);
+  });
+
+  it("marks a chat that blocked the bot inactive, and the next run doesn't send to it", async () => {
+    const summary = await run({ telegram: fakeTelegram(() => "blocked") });
+
+    expect(summary.chatsDeactivated).toBe(1);
+    expect(await isActive(10)).toBe(0);
+
+    githubStars.set(1, 102);
+    const next = fakeTelegram();
+    await run({ telegram: next });
+    expect(next.attempts).toEqual([]);
+  });
+
+  it("marks a chat that no longer exists inactive", async () => {
+    await run({ telegram: fakeTelegram(() => "chat-not-found") });
+
+    expect(await isActive(10)).toBe(0);
+  });
+
+  it("keeps a chat active after other errors, which are likely our bug", async () => {
+    const summary = await run({ telegram: fakeTelegram(() => "too-long") });
+
+    expect(summary.chatsDeactivated).toBe(0);
+    expect(await isActive(10)).toBe(1);
+  });
+
+  it("notifies again after the chat sends /start, with the stars it missed", async () => {
+    await run({ telegram: fakeTelegram(() => "blocked") });
+    githubStars.set(1, 104);
+    await run({ telegram: fakeTelegram() });
+
+    await handleFetch(webhookRequest(messageUpdate("/start", 10)), {
+      config: testConfig(),
+      db,
+      telegramFetch: fakeBotApi().fetch,
+    });
+    expect(await isActive(10)).toBe(1);
+
+    const telegram = fakeTelegram();
+    await run({ telegram });
+    expect(telegram.sent[0]?.text).toBe(starNotifications([{ fullName: "owner/repo-1", gained: 4, total: 104 }]));
+  });
+
+  it("skips a deactivated chat's remaining messages in the same run", async () => {
+    for (let id = 2; id <= 25; id++) {
+      await addRepo(id, 10);
+      await subscribe(10, id);
+      githubStars.set(id, 11);
+    }
+    const telegram = fakeTelegram(() => "blocked");
+
+    const summary = await run({ telegram });
+
+    // 25 repositories need 2 messages; only the first is tried.
+    expect(telegram.attempts).toEqual([10]);
+    expect(summary.chatsDeactivated).toBe(1);
+  });
+
+  it.each<[SendError, boolean]>([
+    [{ kind: "blocked", description: "blocked" }, true],
+    [{ kind: "chat-not-found" }, true],
+    [{ kind: "rate-limited", retryAfter: 3 }, false],
+    [{ kind: "unavailable", message: "down" }, false],
+    [{ kind: "rejected", code: 400, description: "too long" }, false],
+  ])("deactivates after %j: %s", (error, expected) => {
+    expect(deactivatesChat(error)).toBe(expected);
   });
 });
 

@@ -20,6 +20,7 @@ import {
   pruneStarGains,
   recordStarCheck,
   releaseStarCheckLock,
+  setChatActive,
   utcDay,
   type DueNotification,
 } from "./db";
@@ -90,6 +91,8 @@ export interface RunSummary {
   /** Due notifications this run didn't get to; the next run sends them. */
   notificationsLeft: number;
   sendErrors: SendError["kind"][];
+  /** Chats marked inactive because Telegram said they blocked the bot or are gone. */
+  chatsDeactivated: number;
   prunedStarGains: number | null;
   /** Subrequests this run used, out of SUBREQUEST_BUDGET. */
   subrequests: number;
@@ -135,6 +138,27 @@ function countItems(deliveries: readonly Delivery[]): number {
 type Next = "next-delivery" | "stop-sending";
 
 /**
+ * Whether Telegram's refusal means the bot can't reach this chat anymore:
+ * the user blocked it, it was removed from the group, or the chat is gone.
+ * Such chats are marked inactive, so they drop out of the due list and cost
+ * nothing in later runs; any message the bot acts on from the chat
+ * reactivates it. Other 4xx errors are likely our bug and keep the chat active.
+ */
+export function deactivatesChat(error: SendError): boolean {
+  switch (error.kind) {
+    case "blocked":
+    case "chat-not-found":
+      return true;
+    case "rate-limited":
+    case "unavailable":
+    case "rejected":
+      return false;
+    default:
+      return assertNever(error);
+  }
+}
+
+/**
  * After a failed send. A rate limit or an unavailable Telegram stops this
  * run's sending: the rest go out next run. Other refusals only affect this
  * chat.
@@ -158,6 +182,8 @@ interface SendContext {
   deps: StarCheckDeps;
   api: Api;
   summary: RunSummary;
+  /** Chats deactivated during this run: their remaining messages are skipped. */
+  deactivated: Set<number>;
 }
 
 /**
@@ -191,9 +217,19 @@ async function dropRejected(context: SendContext, delivery: Delivery): Promise<N
   return markSent(context, delivery);
 }
 
+/** The chat can't be reached: deactivate it (the D1 call this message's mark would have used). */
+async function deactivate(context: SendContext, chatId: number): Promise<void> {
+  await setChatActive(context.deps.db, chatId, false);
+  context.deactivated.add(chatId);
+  context.summary.chatsDeactivated += 1;
+}
+
 async function onSendFailure(context: SendContext, delivery: Delivery, error: SendError): Promise<Next> {
   context.summary.sendErrors.push(error.kind);
   console.warn(JSON.stringify({ message: "Notification not sent", chatId: delivery.chatId, error }));
+  if (deactivatesChat(error)) {
+    await deactivate(context, delivery.chatId);
+  }
   return error.kind === "rejected" ? dropRejected(context, delivery) : afterSendFailure(error);
 }
 
@@ -217,6 +253,9 @@ function attempts(summary: RunSummary): number {
 
 async function sendAll(context: SendContext, deliveries: readonly Delivery[], maxMessages: number): Promise<void> {
   for (const [index, delivery] of deliveries.entries()) {
+    if (context.deactivated.has(delivery.chatId)) {
+      continue;
+    }
     if (attempts(context.summary) >= maxMessages) {
       context.summary.notificationsLeft += countItems(deliveries.slice(index));
       return;
@@ -320,6 +359,7 @@ function emptySummary(mode: NotificationMode): RunSummary {
     notificationsSkipped: 0,
     notificationsLeft: 0,
     sendErrors: [],
+    chatsDeactivated: 0,
     prunedStarGains: null,
     subrequests: 0,
   };
@@ -374,7 +414,7 @@ export async function runStarCheck(
       timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
       ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
     });
-    const sendCalls = await notify({ config, deps, api, summary }, limits);
+    const sendCalls = await notify({ config, deps, api, summary, deactivated: new Set() }, limits);
     summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
     summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
   } finally {

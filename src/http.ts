@@ -16,11 +16,23 @@ type WebhookHandler = (request: Request) => Promise<Response>;
 // than one handled twice.
 const WEBHOOK_TIMEOUT_MS = 20_000;
 
-// One bot per isolate and Telegram fetch: settings and bindings don't change
-// while the isolate lives, so the other deps are the same for a given config.
-// Keyed by fetch too, so tests use this same cached path.
-const webhooks = new WeakMap<AppConfig, WeakMap<object, WebhookHandler>>();
-const DEFAULT_FETCH_KEY = {};
+// One bot per isolate: settings and bindings don't change while it lives.
+// The cache remembers which deps built each bot and rebuilds when any of them
+// differs, so a reused bot never runs with another request's database, fetch
+// or handlers. Tests go through this same path.
+interface CachedWebhook {
+  deps: readonly unknown[];
+  handler: WebhookHandler;
+}
+const webhooks = new WeakMap<AppConfig, CachedWebhook>();
+
+function depsOf(context: RequestContext): readonly unknown[] {
+  return [context.db, context.telegramFetch, context.githubFetch, context.commandHandlers, context.now];
+}
+
+function sameDeps(a: readonly unknown[], b: readonly unknown[]): boolean {
+  return a.length === b.length && a.every((dep, index) => dep === b[index]);
+}
 
 function buildWebhook(context: RequestContext): WebhookHandler {
   return webhookCallback(createBot(context.config, context), "cloudflare-mod", {
@@ -31,17 +43,14 @@ function buildWebhook(context: RequestContext): WebhookHandler {
   });
 }
 
-function webhookFor(context: RequestContext): WebhookHandler {
-  const byFetch = webhooks.get(context.config) ?? new WeakMap<object, WebhookHandler>();
-  webhooks.set(context.config, byFetch);
-
-  const key = context.telegramFetch ?? DEFAULT_FETCH_KEY;
-  const cached = byFetch.get(key);
-  if (cached) {
-    return cached;
+export function webhookFor(context: RequestContext): WebhookHandler {
+  const deps = depsOf(context);
+  const cached = webhooks.get(context.config);
+  if (cached && sameDeps(cached.deps, deps)) {
+    return cached.handler;
   }
   const handler = buildWebhook(context);
-  byFetch.set(key, handler);
+  webhooks.set(context.config, { deps, handler });
   return handler;
 }
 

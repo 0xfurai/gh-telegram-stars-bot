@@ -148,6 +148,33 @@ describe("POST /webhook: commands", () => {
   });
 });
 
+describe("bot cache", () => {
+  it("reuses the bot for the same deps and rebuilds it when one differs", async () => {
+    const config = testConfig();
+    const telegram = fakeTelegram();
+    const calls: string[] = [];
+    const handlersFor = (name: string): BotDeps["commandHandlers"] => ({
+      add: () => {
+        calls.push(name);
+        return Promise.resolve();
+      },
+    });
+    const first = handlersFor("first");
+    const second = handlersFor("second");
+
+    for (const commandHandlers of [first, first, second]) {
+      await handleFetch(webhookRequest(messageUpdate("/add x")), {
+        config,
+        db: env.DB,
+        telegramFetch: telegram.fetch,
+        commandHandlers,
+      });
+    }
+
+    expect(calls).toEqual(["first", "first", "second"]);
+  });
+});
+
 describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", () => {
   it("logs a reply Telegram refused, as a warning", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

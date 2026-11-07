@@ -1,4 +1,4 @@
-import { Bot, type BotError, type MiddlewareFn } from "grammy";
+import { Bot, type BotError, type Context, type MiddlewareFn } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { COMMANDS, type CommandName } from "./command-list";
 import { createCommandHandlers, handlePlainText, type CommandHandler } from "./commands";
@@ -55,21 +55,48 @@ function startsWithCommand(entities: MessageEntity[] | undefined): boolean {
   return entities?.some((e) => e.type === "bot_command" && e.offset === 0) ?? false;
 }
 
-function dispatcher(handlers: Record<CommandName, CommandHandler>): MiddlewareFn {
+type Action = () => Promise<void>;
+
+/**
+ * What a message asks the bot to do, or null when it's not for the bot:
+ * group chatter, or a command for another bot.
+ */
+function actionFor(ctx: Context, text: string, handlers: Record<CommandName, CommandHandler>): Action | null {
+  const message = ctx.message;
+  const command = message ? parseCommand(message, ctx.me.username) : null;
+  if (command !== null) {
+    const handler = isCommandName(command.name) ? handlers[command.name] : null;
+    return handler ? () => handler(ctx, command.args) : () => replyHtml(ctx, messages.unknownCommand());
+  }
+  if (startsWithCommand(message?.entities) || ctx.chat?.type !== "private") {
+    return null;
+  }
+  return () => handlePlainText(ctx, text, handlers);
+}
+
+/**
+ * A message the bot acts on means it can reach the chat: create or reactivate
+ * it. If D1 is down, log it and still answer.
+ */
+async function trackChat(db: D1Database, chatId: number): Promise<void> {
+  try {
+    await ensureChat(db, chatId);
+  } catch (error) {
+    console.error(
+      JSON.stringify({ message: "Chat not tracked", chatId, error: error instanceof Error ? error.message : String(error) }),
+    );
+  }
+}
+
+function dispatcher(db: D1Database, handlers: Record<CommandName, CommandHandler>): MiddlewareFn {
   return async (ctx) => {
-    const message = ctx.message;
-    if (message?.text === undefined) {
+    const text = ctx.message?.text;
+    const action = text === undefined ? null : actionFor(ctx, text, handlers);
+    if (action === null || ctx.chat === undefined) {
       return;
     }
-    const command = parseCommand(message, ctx.me.username);
-    if (command === null) {
-      // A command for another bot isn't plain text: ignore it.
-      return startsWithCommand(message.entities) ? undefined : handlePlainText(ctx, message.text, handlers);
-    }
-    if (isCommandName(command.name)) {
-      return handlers[command.name](ctx, command.args);
-    }
-    return replyHtml(ctx, messages.unknownCommand());
+    await trackChat(db, ctx.chat.id);
+    await action();
   };
 }
 
@@ -79,16 +106,6 @@ function allowedChatsOnly(allowed: ReadonlySet<number> | null): MiddlewareFn {
     if (allowed === null || (ctx.chat !== undefined && allowed.has(ctx.chat.id))) {
       await next();
     }
-  };
-}
-
-/** A message from a chat means the bot can reach it: create or reactivate it. */
-function trackChat(db: D1Database): MiddlewareFn {
-  return async (ctx, next) => {
-    if (ctx.chat !== undefined) {
-      await ensureChat(db, ctx.chat.id);
-    }
-    await next();
   };
 }
 
@@ -125,6 +142,6 @@ export function createBot(config: AppConfig, deps: BotDeps): Bot {
   // with webhooks, errors need an error boundary around the handlers.)
   const guarded = bot.errorBoundary(logUpdateError);
   guarded.use(allowedChatsOnly(config.allowedChatIds));
-  guarded.on("message:text", trackChat(deps.db), dispatcher(handlers));
+  guarded.on("message:text", dispatcher(deps.db, handlers));
   return bot;
 }

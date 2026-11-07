@@ -5,7 +5,7 @@
 // "*" in a repository name made Telegram reject the message, and those
 // notifications were never delivered.
 import { COMMANDS } from "./command-list";
-import type { Repository, Stats } from "./db";
+import { repositoryUrl, type Repository, type Stats } from "./db";
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
 
@@ -15,12 +15,16 @@ export function html(text: string): string {
 }
 
 export function repositoryLink(fullName: string): string {
-  const url = `https://github.com/${fullName}`;
-  return `<a href="${html(url)}">${html(fullName)}</a>`;
+  return `<a href="${html(repositoryUrl(fullName))}">${html(fullName)}</a>`;
+}
+
+/** 1234 -> "1,234". Every number in a message goes through this. */
+export function number(n: number): string {
+  return n.toLocaleString("en-US");
 }
 
 function count(n: number, singular: string, plural = `${singular}s`): string {
-  return `${n.toLocaleString("en-US")} ${n === 1 ? singular : plural}`;
+  return `${number(n)} ${n === 1 ? singular : plural}`;
 }
 
 const COMMAND_LINES = COMMANDS.map(({ command, description }) => `/${command} - ${html(description)}`).join("\n");
@@ -114,31 +118,39 @@ export function notSubscribed(owner: string, name: string): string {
   return `You're not subscribed to <code>${html(`${owner}/${name}`)}</code>.`;
 }
 
-export function subscriptionList(repos: readonly Repository[], maxReposPerChat: number): string {
+/** Most entries in one /list message, to stay well under Telegram's 4096 characters. */
+export const MAX_LIST_ENTRIES_PER_MESSAGE = 25;
+
+/** The /list reply: one message, or several for long lists. */
+export function subscriptionList(repos: readonly Repository[], maxReposPerChat: number): string[] {
   if (repos.length === 0) {
-    return "📭 You have no subscriptions yet. Use <code>/add owner/repo</code> to add one.";
+    return ["📭 You have no subscriptions yet. Use <code>/add owner/repo</code> to add one."];
   }
   const lines = repos.map(
     (repo, index) =>
-      `${index + 1}. ${repositoryLink(repo.fullName)}${repo.isArchived ? " 📦" : ""} - ⭐ ${repo.starsCount.toLocaleString("en-US")}`,
+      `${index + 1}. ${repositoryLink(repo.fullName)}${repo.isArchived ? " 📦" : ""} - ⭐ ${number(repo.starsCount)}`,
   );
-  return [
-    `🌟 <b>Your subscriptions</b> (${repos.length}/${maxReposPerChat})`,
-    "",
-    ...lines,
-    "",
-    "Use <code>/remove owner/repo</code> to unsubscribe.",
-  ].join("\n");
+  const pages: string[][] = [];
+  for (let i = 0; i < lines.length; i += MAX_LIST_ENTRIES_PER_MESSAGE) {
+    pages.push(lines.slice(i, i + MAX_LIST_ENTRIES_PER_MESSAGE));
+  }
+  return pages.map((page, index) =>
+    [
+      ...(index === 0 ? [`🌟 <b>Your subscriptions</b> (${repos.length}/${maxReposPerChat})`, ""] : []),
+      ...page,
+      ...(index === pages.length - 1 ? ["", "Use <code>/remove owner/repo</code> to unsubscribe."] : []),
+    ].join("\n"),
+  );
 }
 
-export function stats(s: Stats): string {
+export function stats(s: Stats, days: number): string {
   return [
     "📊 <b>Bot statistics</b>",
     "",
     `📦 ${count(s.repositories, "repository", "repositories")}`,
     `👥 ${count(s.activeChats, "active chat")}`,
     `🔔 ${count(s.subscriptions, "subscription")}`,
-    `⭐ ${count(s.starsGained, "star")} gained in the last 90 days`,
+    `⭐ ${count(s.starsGained, "star")} gained in the last ${days} days`,
   ].join("\n");
 }
 

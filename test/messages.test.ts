@@ -59,17 +59,35 @@ describe("messages", () => {
   });
 
   it("lists subscriptions with their star counts, or says there are none", () => {
-    expect(messages.subscriptionList([], 50)).toContain("no subscriptions yet");
+    expect(messages.subscriptionList([], 50)[0]).toContain("no subscriptions yet");
 
-    const text = messages.subscriptionList([repo(), repo({ id: 2, fullName: "a/b", isArchived: true, starsCount: 5 })], 50);
+    const [text = ""] = messages.subscriptionList(
+      [repo(), repo({ id: 2, fullName: "a/b", isArchived: true, starsCount: 5 })],
+      50,
+    );
     expect(text).toContain("(2/50)");
     expect(text).toContain("1. <a href=\"https://github.com/owner/my_repo_name\">owner/my_repo_name</a> - ⭐ 1,234");
     expect(text).toContain("📦 - ⭐ 5");
   });
 
-  it("formats stats with singular and plural", () => {
-    expect(messages.stats({ repositories: 1, activeChats: 2, subscriptions: 1, starsGained: 0 })).toContain(
-      "📦 1 repository\n👥 2 active chats\n🔔 1 subscription\n⭐ 0 stars gained in the last 90 days",
+  it("splits long lists, numbering across messages, with the header first and the hint last", () => {
+    const repos = Array.from({ length: 30 }, (_, i) => repo({ id: i, fullName: `owner/repo-${i}` }));
+
+    const pages = messages.subscriptionList(repos, 50);
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0]).toContain("(30/50)");
+    expect(pages[0]).not.toContain("/remove");
+    expect(pages[1]).toContain("26. ");
+    expect(pages[1]).toContain("/remove");
+    for (const page of pages) {
+      expect(page.length).toBeLessThan(4096);
+    }
+  });
+
+  it("formats stats with singular and plural, for the given period", () => {
+    expect(messages.stats({ repositories: 1, activeChats: 2, subscriptions: 1, starsGained: 0 }, 30)).toContain(
+      "📦 1 repository\n👥 2 active chats\n🔔 1 subscription\n⭐ 0 stars gained in the last 30 days",
     );
   });
 

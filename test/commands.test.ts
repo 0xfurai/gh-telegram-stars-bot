@@ -176,6 +176,18 @@ describe("/add", () => {
     expect(await replyTo("/add owner/my_repo", { settings })).toBe(messages.limitReached(1));
   });
 
+  it("answers the limit and duplicates from the chat's subscriptions, without calling GitHub or storing anything", async () => {
+    const settings = { MAX_REPOS_PER_CHAT: "1" };
+    await send("/add facebook/react", { settings });
+
+    // GitHub is "down": a lookup would answer "can't reach GitHub".
+    expect(await replyTo("/add owner/my_repo", { settings, github: "down" })).toBe(messages.limitReached(1));
+    expect(await replyTo("/add FACEBOOK/react", { settings, github: "down" })).toBe(
+      messages.alreadySubscribed("facebook/react"),
+    );
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM repositories").first("n")).toBe(1);
+  });
+
   it("explains missing input and invalid names without calling GitHub", async () => {
     expect(await replyTo("/add")).toBe(messages.addUsage());
     expect(await replyTo("/add not a repo", { github: "down" })).toBe(messages.invalidRepository());
@@ -204,6 +216,22 @@ describe("/list, /remove and /stats", () => {
     await send("/add owner/my_repo");
   });
 
+  it("splits a long list into several messages", async () => {
+    const inserts = Array.from({ length: 30 }, (_, i) => [
+      db
+        .prepare("INSERT INTO repositories (id, github_node_id, full_name, stars_count) VALUES (?, ?, ?, ?)")
+        .bind(1000 + i, `R_${1000 + i}`, `some-long-owner-name/a-fairly-long-repository-name-${i}`, i),
+      db.prepare("INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars) VALUES (1, ?, 0)").bind(1000 + i),
+    ]);
+    await db.batch(inserts.flat());
+
+    const replies = await send("/list", { settings: { MAX_REPOS_PER_CHAT: "50" } });
+
+    expect(replies).toHaveLength(2);
+    expect(String(replies[0]?.body.text)).toContain("(32/50)");
+    expect(String(replies[1]?.body.text)).toContain("26. ");
+  });
+
   it("lists the subscriptions, most-starred first", async () => {
     const text = await replyTo("/list");
 
@@ -227,7 +255,7 @@ describe("/list, /remove and /stats", () => {
 
   it("shows stats", async () => {
     expect(await replyTo("/stats")).toBe(
-      messages.stats({ repositories: 2, activeChats: 1, subscriptions: 2, starsGained: 0 }),
+      messages.stats({ repositories: 2, activeChats: 1, subscriptions: 2, starsGained: 0 }, 90),
     );
   });
 });
@@ -245,11 +273,20 @@ describe("plain text", () => {
     expect(await replyTo("hello there")).toBe(messages.plainTextHint());
   });
 
-  it("only treats GitHub URLs as repositories in groups, and ignores other talk", async () => {
-    expect(await send("and/or", { chatId: -100, chatType: "group" })).toEqual([]);
-    expect(await send("hello", { chatId: -100, chatType: "group" })).toEqual([]);
+  it("ignores plain text in groups, links included, and doesn't touch D1 for it", async () => {
+    const group = { chatId: -100, chatType: "group" } as const;
 
-    await send("https://github.com/facebook/react", { chatId: -100, chatType: "group" });
+    expect(await send("and/or", group)).toEqual([]);
+    expect(await send("hello", group)).toEqual([]);
+    expect(await send("https://github.com/facebook/react", group)).toEqual([]);
+
+    expect(await lastNotified(-100, 10)).toBeNull();
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM chats WHERE id = -100").first("n")).toBe(0);
+  });
+
+  it("subscribes a group with /add", async () => {
+    await send("/add facebook/react", { chatId: -100, chatType: "group" });
+
     expect(await lastNotified(-100, 10)).toBe(230000);
   });
 });

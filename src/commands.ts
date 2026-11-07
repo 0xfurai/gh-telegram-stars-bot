@@ -71,6 +71,19 @@ function subscribeReply(outcome: SubscribeOutcome, repo: Repository, maxReposPer
   }
 }
 
+/**
+ * Answers /add from the chat's own subscriptions when that's enough, before
+ * any GitHub call or write: already subscribed (by name), or at the limit.
+ */
+function answerFromSubscriptions(subscriptions: readonly Repository[], input: RepositoryName, max: number): string | null {
+  const wanted = `${input.owner}/${input.name}`.toLowerCase();
+  const existing = subscriptions.find((repo) => repo.fullName.toLowerCase() === wanted);
+  if (existing) {
+    return messages.alreadySubscribed(existing.fullName);
+  }
+  return subscriptions.length >= max ? messages.limitReached(max) : null;
+}
+
 function chatIdOf(ctx: Context): number {
   if (ctx.chat === undefined) {
     throw new Error("Command without a chat");
@@ -89,6 +102,10 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
     const input = parseRepositoryInput(args);
     if (input === null) {
       return replyHtml(ctx, messages.invalidRepository());
+    }
+    const early = answerFromSubscriptions(await listSubscriptions(deps.db, chatIdOf(ctx)), input, max);
+    if (early !== null) {
+      return replyHtml(ctx, early);
     }
     const found = await getRepository(deps.github, input.owner, input.name);
     if (!found.ok) {
@@ -118,32 +135,34 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
     start: (ctx) => replyHtml(ctx, messages.welcome()),
     help: (ctx) => replyHtml(ctx, messages.help(max)),
     add,
-    list: async (ctx) => replyHtml(ctx, messages.subscriptionList(await listSubscriptions(deps.db, chatIdOf(ctx)), max)),
+    list: async (ctx) => {
+      for (const page of messages.subscriptionList(await listSubscriptions(deps.db, chatIdOf(ctx)), max)) {
+        await replyHtml(ctx, page);
+      }
+    },
     remove,
     stats: async (ctx) => {
       const since = utcDay(new Date(now().getTime() - (STATS_DAYS - 1) * DAY_MS));
-      return replyHtml(ctx, messages.stats(await getStats(deps.db, since)));
+      return replyHtml(ctx, messages.stats(await getStats(deps.db, since), STATS_DAYS));
     },
   };
 }
 
 /**
- * Plain text that's a repository is treated as /add. In private chats that's
- * a GitHub URL or owner/repo; in groups only a GitHub URL, because ordinary
- * talk ("and/or") also looks like owner/repo. Other text gets a hint in
- * private chats and is ignored in groups.
+ * In private chats, a repository sent as plain text (owner/repo or a GitHub
+ * URL) is treated as /add, and other text gets a hint. Groups ignore plain
+ * text: sharing a link there, or saying "and/or", must not subscribe the
+ * whole group. Groups use /add.
  */
 export async function handlePlainText(
   ctx: Context,
   text: string,
   handlers: Record<CommandName, CommandHandler>,
 ): Promise<void> {
-  const isPrivate = ctx.chat?.type === "private";
-  const isRepository = parseRepositoryInput(text) !== null && (isPrivate || /github\.com\//i.test(text));
-  if (isRepository) {
-    return handlers.add(ctx, text);
+  if (ctx.chat?.type !== "private") {
+    return;
   }
-  if (isPrivate) {
-    return replyHtml(ctx, messages.plainTextHint());
-  }
+  return parseRepositoryInput(text) !== null
+    ? handlers.add(ctx, text)
+    : replyHtml(ctx, messages.plainTextHint());
 }

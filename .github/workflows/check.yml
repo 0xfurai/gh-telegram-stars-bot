@@ -3,6 +3,11 @@ name: Check
 # Typecheck, lint and test. Used by ci.yml and before every production deploy.
 on:
   workflow_call:
+    inputs:
+      coverage:
+        description: Measure coverage and keep the README badge (main CI only).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,12 +39,19 @@ jobs:
       - run: bun run lint
 
       # `bun run test` runs Vitest. `bun test` would run Bun's own test runner.
-      # With coverage: the same tests, measured for the README badge.
-      - run: bun run test:coverage
+      # The production deploy gate runs the plain tests, without instrumentation.
+      - if: ${{ !inputs.coverage }}
+        run: bun run test
 
-      - name: Keep the coverage summary for the badge
+      # The same tests with coverage, then the badge file for ci.yml to publish.
+      - if: ${{ inputs.coverage }}
+        run: bun run test:coverage && bun run coverage:badge
+
+      - if: ${{ inputs.coverage }}
+        name: Keep the coverage badge
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: coverage-summary
-          path: coverage/coverage-summary.json
+          name: coverage-badge
+          path: coverage/badge.json
+          if-no-files-found: error
           retention-days: 7

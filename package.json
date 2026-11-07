@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "coverage:badge": "node scripts/coverage-badge.ts",
     "typegen:check": "wrangler types --check",
     "telegram:setup": "node scripts/telegram-setup.ts",
     "migrate:copy": "node scripts/copy-to-d1.ts",

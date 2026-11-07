@@ -142,6 +142,38 @@ bunx wrangler d1 execute DB --remote --command \
   "SELECT scheduled_at, ok, summary FROM star_check_runs ORDER BY id DESC LIMIT 5"
 ```
 
+## Copying users from the old app (Supabase)
+
+Existing users keep their subscriptions, don't need to send `/start` again, and get neither old stars nor a gap.
+
+All three scripts need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`; the copy also needs `GITHUB_TOKEN`. Exports and generated SQL contain chat IDs: never commit them, and delete them when done.
+
+```sh
+# 0. Before a full copy: a Supabase backup (pg_dump), kept outside the repo.
+
+# 1. Build the SQL. Only reads Supabase and GitHub; writes a file to your temp folder.
+bun run migrate:copy -- --mode=shadow     # daily during the shadow run
+bun run migrate:copy -- --mode=full       # the final copy at the switch
+
+# 2. Apply it (the script prints the exact command).
+bunx wrangler d1 execute DB --remote --file <file>
+
+# 3. Verify: compares every chat, subscription and repository; fails on any difference.
+bun run migrate:verify -- --mode=shadow   # or --mode=full; --local for a dry run
+
+# Rollback only: copy D1 back to Supabase (chats, subscriptions, current star counts).
+bun run migrate:copy-back -- --dry-run    # see what would change
+bun run migrate:copy-back
+bun run migrate:verify -- --mode=shadow
+```
+
+The two copy modes:
+
+* **`full`** makes D1 an exact copy of Supabase. Every subscription starts at Supabase's star count, and the last 90 days of star events become daily gains.
+* **`shadow`** mirrors chats and subscriptions, but keeps the star counts and gains the Worker tracks itself. New subscriptions start at D1's count.
+
+Repositories that are gone from GitHub, or private, are stored without a node ID and archived. GitHub IDs and Telegram chat IDs are the keys, so running a copy again updates rather than duplicates.
+
 ## CI
 
 GitHub Actions runs on the self-hosted `nexus-runner`, for pull requests from forks too. A pull request can change the workflow files, so before approving a run from an outside contributor, check that it doesn't touch `.github/`. The repo requires approval for runs from all outside contributors.

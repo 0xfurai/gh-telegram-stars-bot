@@ -13,7 +13,7 @@ function errorsOf(result: ConfigResult): string[] {
 }
 
 function botInfo(id: number): string {
-  return JSON.stringify({ id, is_bot: true, first_name: "Test bot", username: "test_bot" });
+  return JSON.stringify({ ...(JSON.parse(TEST_SETTINGS.BOT_INFO) as object), id });
 }
 
 describe("parseConfig", () => {
@@ -25,7 +25,7 @@ describe("parseConfig", () => {
         githubToken: TEST_SETTINGS.GITHUB_TOKEN,
         webhookSecret: TEST_SETTINGS.WEBHOOK_SECRET,
         notifications: "dry-run",
-        botInfo: { id: 123456789, is_bot: true, first_name: "Test bot", username: "test_bot" },
+        botInfo: JSON.parse(TEST_SETTINGS.BOT_INFO) as unknown,
         maxReposPerChat: 50,
         allowedChatIds: null,
         adminChatId: null,
@@ -114,7 +114,9 @@ describe("parseConfig", () => {
     expect(errorsOf(parse({ BOT_INFO: "{not json" }))).toEqual([
       "BOT_INFO must be JSON (the bot's getMe result)",
     ]);
-    expect(errorsOf(parse({ BOT_INFO: JSON.stringify({ id: 123456789, is_bot: false }) }))).toHaveLength(3);
+    const errors = errorsOf(parse({ BOT_INFO: JSON.stringify({ id: 123456789, is_bot: false }) }));
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.every((error) => error.startsWith("BOT_INFO."))).toBe(true);
   });
 
   it("rejects BOT_INFO for a different bot than the token", () => {

@@ -78,9 +78,18 @@ To point a bot at a deployed Worker and register its command menu:
 TELEGRAM_BOT_TOKEN=... WEBHOOK_SECRET=... WORKER_URL=https://<worker-host> bun run telegram:setup
 ```
 
-Use the same token and secret as the Worker's secrets. The script keeps pending updates, so messages sent during a switch reach the Worker. It also prints the `BOT_INFO` value to store with `wrangler secret put BOT_INFO`.
+Use the same token and secret as the Worker's secrets. The script:
 
-A handler error is logged (`"Update failed"` with the update ID) and the request still gets 200, so Telegram doesn't redeliver the update.
+1. Checks the token (`getMe`) and prints the `BOT_INFO` value to store with `wrangler secret put BOT_INFO`.
+2. Refuses to continue unless the Worker's `/health` answers 200. A 503 means a setting is missing or invalid: store it and run the script again.
+3. Sets the webhook, keeping pending updates so messages sent during a switch reach the Worker, and registers the command menu.
+
+Every webhook request gets 200 once the secret checks out, so Telegram never redelivers an update:
+
+* A handler that throws is logged as `"Update failed"` with the update ID.
+* A reply Telegram refuses (blocked, rate-limited, chat gone) is logged as `"Reply not sent"` with the reason.
+* A body that isn't JSON is logged as `"Webhook request failed"`.
+* An update that takes over 20 seconds gets its 200 early.
 
 ## CI
 

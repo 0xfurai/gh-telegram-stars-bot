@@ -13,7 +13,7 @@
     "dev": "wrangler dev",
     "dev:scheduled": "wrangler dev --test-scheduled",
     "typegen": "wrangler types",
-    "typecheck": "tsc -p . && tsc -p test && tsc -p tsconfig.tools.json",
+    "typecheck": "tsc -p . && tsc -p test && tsc -p tsconfig.tools.json && tsc -p scripts",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",

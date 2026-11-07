@@ -3,6 +3,9 @@
 //   TELEGRAM_BOT_TOKEN=... WEBHOOK_SECRET=... WORKER_URL=https://<worker-host> \
 //     bun run telegram:setup
 //
+// The command menu lists the public commands only, the same in every chat.
+// Admin commands (/stats) are listed by /help in the admin chat.
+//
 // Use the same TELEGRAM_BOT_TOKEN and WEBHOOK_SECRET as the Worker's secrets.
 //
 // Order matters, so a failed step never leaves Telegram pointing at a broken
@@ -15,7 +18,7 @@
 //      switching reach the Worker), then setMyCommands.
 //
 // Runs on Node 24 (type stripping); never prints the token.
-import { COMMANDS } from "../src/command-list.ts";
+import { PUBLIC_COMMANDS } from "../src/command-list.ts";
 
 interface ApiResponse {
   ok: boolean;
@@ -83,7 +86,7 @@ async function main(): Promise<void> {
     allowed_updates: ["message", "my_chat_member"],
     drop_pending_updates: false,
   });
-  await callApi(token, "setMyCommands", { commands: COMMANDS });
+  await callApi(token, "setMyCommands", { commands: PUBLIC_COMMANDS });
 
   const info = (await callApi(token, "getWebhookInfo")) as {
     url: string;
@@ -93,7 +96,7 @@ async function main(): Promise<void> {
   console.log(`Webhook:          ${info.url}`);
   console.log(`Pending updates:  ${info.pending_update_count}`);
   console.log(`Last error:       ${info.last_error_message ?? "none"}`);
-  console.log(`Commands:         ${COMMANDS.map((c) => `/${c.command}`).join(" ")}`);
+  console.log(`Commands:         ${PUBLIC_COMMANDS.map((c) => `/${c.command}`).join(" ")}`);
 }
 
 main().catch((error: unknown) => {

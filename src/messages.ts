@@ -5,7 +5,7 @@
 // "*" in a repository name made Telegram reject the message, and those
 // notifications were never delivered.
 import { chunk } from "./chunk";
-import { COMMANDS } from "./command-list";
+import { ADMIN_COMMANDS, PUBLIC_COMMANDS } from "./command-list";
 import { repositoryUrl, type Repository, type Stats } from "./db";
 import type { RepositoryInputError } from "./repo-input";
 import { assertNever } from "./result";
@@ -30,7 +30,11 @@ function count(n: number, singular: string, plural = `${singular}s`): string {
   return `${number(n)} ${n === 1 ? singular : plural}`;
 }
 
-const COMMAND_LINES = COMMANDS.map(({ command, description }) => `/${command} - ${html(description)}`).join("\n");
+function commandLines(commands: readonly { command: string; description: string }[]): string {
+  return commands.map(({ command, description }) => `/${command} - ${html(description)}`).join("\n");
+}
+
+const COMMAND_LINES = commandLines(PUBLIC_COMMANDS);
 
 const EXAMPLES = [
   "<b>Examples:</b>",
@@ -53,13 +57,15 @@ export function welcome(): string {
   ].join("\n");
 }
 
-export function help(maxReposPerChat: number): string {
+/** Help; in the admin chat (`admin`), the admin commands too. */
+export function help(maxReposPerChat: number, admin = false): string {
   return [
     "🌟 <b>GitHub Stars Bot</b>",
     "",
     "<b>Commands:</b>",
     COMMAND_LINES,
     "",
+    ...(admin ? ["<b>Admin chat only:</b>", commandLines(ADMIN_COMMANDS), ""] : []),
     "<b>Repository formats:</b>",
     "• <code>owner/repo</code>, e.g. <code>microsoft/vscode</code>",
     "• A GitHub URL, e.g. <code>https://github.com/facebook/react</code>",

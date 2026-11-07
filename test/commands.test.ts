@@ -259,10 +259,34 @@ describe("/list, /remove and /stats", () => {
     expect(await replyTo("/remove nope")).toBe(messages.invalidRepository("not-a-repository"));
   });
 
-  it("shows stats", async () => {
-    expect(await replyTo("/stats")).toBe(
+  it("shows stats in the admin chat", async () => {
+    expect(await replyTo("/stats", { settings: { ADMIN_CHAT_ID: "1" } })).toBe(
       messages.stats({ repositories: 2, activeChats: 1, subscriptions: 2, starsGained: 0 }, 90),
     );
+  });
+
+  it("shows stats when the admin chat is a group", async () => {
+    const replies = await send("/stats", { chatId: -100123, chatType: "group", settings: { ADMIN_CHAT_ID: "-100123" } });
+
+    expect(String(replies[0]?.body.text)).toContain("Bot statistics");
+  });
+
+  it("lists /stats in /help in the admin chat only", async () => {
+    expect(await replyTo("/help", { settings: { ADMIN_CHAT_ID: "1" } })).toBe(messages.help(50, true));
+    expect(messages.help(50, true)).toContain("/stats");
+  });
+
+  it("answers /stats like an unknown command anywhere else, or with no admin chat", async () => {
+    expect(await replyTo("/stats", { settings: { ADMIN_CHAT_ID: "42" } })).toBe(messages.unknownCommand());
+    expect(await replyTo("/stats")).toBe(messages.unknownCommand());
+    expect(await replyTo("/stats", { chatId: -100, chatType: "group", settings: { ADMIN_CHAT_ID: "42" } })).toBe(
+      messages.unknownCommand(),
+    );
+  });
+
+  it("leaves /stats out of /help and the welcome message", async () => {
+    expect(await replyTo("/help")).not.toContain("/stats");
+    expect(await replyTo("/start")).not.toContain("/stats");
   });
 });
 

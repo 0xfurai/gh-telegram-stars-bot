@@ -218,3 +218,68 @@ describe("POST /webhook: failures answer 200, so Telegram doesn't redeliver", ()
     expect(String(error.mock.calls[0]?.[0])).toContain("Webhook request failed");
   });
 });
+
+describe("POST /webhook: membership changes", () => {
+  const user = { id: 7, is_bot: false, first_name: "User" };
+  const bot = { id: 123456789, is_bot: true, first_name: "Test bot", username: "test_bot" };
+  let nextUpdateId = 5000;
+
+  function membership(chatId: number, status: "member" | "kicked" | "left" | "administrator") {
+    return {
+      update_id: ++nextUpdateId,
+      my_chat_member: {
+        chat: chatId > 0 ? { id: chatId, type: "private", first_name: "User" } : { id: chatId, type: "group", title: "G" },
+        from: user,
+        date: 1_700_000_000,
+        old_chat_member: { status: "member", user: bot },
+        new_chat_member: status === "kicked" ? { status, user: bot, until_date: 0 } : { status, user: bot },
+      },
+    };
+  }
+
+  async function isActive(chatId: number) {
+    return env.DB.prepare("SELECT is_active FROM chats WHERE id = ?").bind(chatId).first<number>("is_active");
+  }
+
+  it("deactivates a chat when the user blocks the bot, and reactivates it when they unblock", async () => {
+    await env.DB.prepare("INSERT INTO chats (id) VALUES (31) ON CONFLICT DO NOTHING").run();
+
+    await deliver(membership(31, "kicked"));
+    expect(await isActive(31)).toBe(0);
+
+    await deliver(membership(31, "member"));
+    expect(await isActive(31)).toBe(1);
+  });
+
+  it("tracks being removed from and added back to a group", async () => {
+    await deliver(membership(-32, "left"));
+    expect(await isActive(-32)).toBe(0);
+
+    await deliver(membership(-32, "administrator"));
+    expect(await isActive(-32)).toBe(1);
+  });
+
+  it("moves a group's subscriptions when it becomes a supergroup", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO chats (id) VALUES (-33)"),
+      env.DB.prepare("INSERT INTO repositories (id, github_node_id, full_name, stars_count) VALUES (330, 'R_330', 'o/r', 5)"),
+      env.DB.prepare("INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars) VALUES (-33, 330, 5)"),
+    ]);
+
+    await deliver({
+      update_id: ++nextUpdateId,
+      message: {
+        message_id: 1,
+        date: 1_700_000_000,
+        chat: { id: -33, type: "group", title: "G" },
+        from: user,
+        migrate_to_chat_id: -100333,
+      },
+    });
+
+    const moved = await env.DB.prepare("SELECT chat_id FROM chat_repositories WHERE repository_id = 330").all();
+    expect(moved.results).toEqual([{ chat_id: -100333 }]);
+    expect(await isActive(-100333)).toBe(1);
+    expect(await isActive(-33)).toBe(0);
+  });
+});

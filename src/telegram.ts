@@ -12,6 +12,8 @@ export type SendError =
   | { kind: "blocked"; description: string }
   /** 400 "chat not found": the chat no longer exists. */
   | { kind: "chat-not-found" }
+  /** 400 with migrate_to_chat_id: the group became a supergroup with a new ID. */
+  | { kind: "chat-migrated"; newChatId: number }
   /** 429: wait `retryAfter` seconds before sending again. */
   | { kind: "rate-limited"; retryAfter: number }
   /** Another 4xx: Telegram rejected the request itself, so it's likely our bug. */
@@ -25,6 +27,9 @@ function fromApiError(error: GrammyError): SendError {
   }
   if (error.error_code === 429) {
     return { kind: "rate-limited", retryAfter: error.parameters.retry_after ?? 1 };
+  }
+  if (error.parameters.migrate_to_chat_id !== undefined) {
+    return { kind: "chat-migrated", newChatId: error.parameters.migrate_to_chat_id };
   }
   if (error.error_code === 400 && /chat not found/i.test(error.description)) {
     return { kind: "chat-not-found" };

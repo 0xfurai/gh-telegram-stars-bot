@@ -19,6 +19,8 @@ import {
   markNotifiedMany,
   pruneStarGains,
   recordStarCheck,
+  deactivateChat,
+  migrateChat,
   releaseStarCheckLock,
   utcDay,
   type DueNotification,
@@ -90,6 +92,15 @@ export interface RunSummary {
   /** Due notifications this run didn't get to; the next run sends them. */
   notificationsLeft: number;
   sendErrors: SendError["kind"][];
+  /** Chats marked inactive because Telegram said they blocked the bot or are gone. */
+  chatsDeactivated: number;
+  /** Groups that became supergroups; their subscriptions moved to the new ID. */
+  chatsMigrated: number;
+  /**
+   * Notifications not tried because their chat became unreachable earlier in
+   * this run. They stay due for when the chat is reachable again.
+   */
+  notificationsForUnreachableChats: number;
   prunedStarGains: number | null;
   /** Subrequests this run used, out of SUBREQUEST_BUDGET. */
   subrequests: number;
@@ -134,20 +145,45 @@ function countItems(deliveries: readonly Delivery[]): number {
 /** What the send loop does after one delivery. */
 type Next = "next-delivery" | "stop-sending";
 
+/** What happens to the chat after a failed send. */
+export type ChatEffect =
+  | { kind: "keep" }
+  /** The bot can't reach the chat: mark it inactive until it's reachable again. */
+  | { kind: "deactivate" }
+  /** The group became a supergroup: move its subscriptions to the new ID. */
+  | { kind: "migrate"; newChatId: number };
+
+export interface FailurePolicy {
+  chat: ChatEffect;
+  /** retry: stays due (next run, or once the chat is reachable). drop: marked sent. */
+  notification: "retry" | "drop";
+  sending: Next;
+}
+
 /**
- * After a failed send. A rate limit or an unavailable Telegram stops this
- * run's sending: the rest go out next run. Other refusals only affect this
- * chat.
+ * Every send failure's handling, in one exhaustive place.
+ *
+ * - A rate limit or an unavailable Telegram stops this run's sending; the
+ *   rest go out next run.
+ * - A blocked or missing chat is deactivated. Its notifications stay due for
+ *   when the chat is reachable again: the user unblocks the bot, the bot is
+ *   added back to the group (my_chat_member), or the chat sends a command.
+ * - A group that became a supergroup moves to its new ID; next run sends there.
+ * - A message Telegram rejects (likely our bug, e.g. bad HTML) is dropped, so
+ *   it can't take a message slot every run; newer stars produce a new message.
  */
-export function afterSendFailure(error: SendError): Next {
+export function failurePolicy(error: SendError): FailurePolicy {
   switch (error.kind) {
     case "rate-limited":
     case "unavailable":
-      return "stop-sending";
+      return { chat: { kind: "keep" }, notification: "retry", sending: "stop-sending" };
     case "blocked":
     case "chat-not-found":
+      return { chat: { kind: "deactivate" }, notification: "retry", sending: "next-delivery" };
+    case "chat-migrated":
+      return { chat: { kind: "migrate", newChatId: error.newChatId }, notification: "retry", sending: "next-delivery" };
     case "rejected":
-      return "next-delivery";
+      return { chat: { kind: "keep" }, notification: "drop", sending: "next-delivery" };
     default:
       return assertNever(error);
   }
@@ -158,6 +194,12 @@ interface SendContext {
   deps: StarCheckDeps;
   api: Api;
   summary: RunSummary;
+  /** Chats deactivated or migrated during this run: their remaining messages are skipped. */
+  unreachable: Set<number>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -174,30 +216,62 @@ async function markSent(context: SendContext, delivery: Delivery): Promise<Next>
       JSON.stringify({
         message: "Notification sent but not marked; it may be sent again",
         chatId: delivery.chatId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
     );
     return "stop-sending";
   }
 }
 
-/**
- * Telegram rejected the message itself (likely our bug, e.g. bad HTML).
- * Dropping it keeps it from taking a message slot every run forever; newer
- * stars produce a new message.
- */
-async function dropRejected(context: SendContext, delivery: Delivery): Promise<Next> {
-  context.summary.notificationsSkipped += delivery.items.length;
-  return markSent(context, delivery);
+/** Applies a chat effect. This is the D1 call the message's mark would have used. */
+async function applyChatEffect(context: SendContext, chatId: number, effect: ChatEffect, sendStartedAt: string) {
+  switch (effect.kind) {
+    case "keep":
+      return;
+    case "deactivate":
+      // Skipped if the chat was reactivated after this send started.
+      if (await deactivateChat(context.deps.db, chatId, sendStartedAt)) {
+        context.summary.chatsDeactivated += 1;
+      }
+      context.unreachable.add(chatId);
+      return;
+    case "migrate":
+      await migrateChat(context.deps.db, chatId, effect.newChatId);
+      context.summary.chatsMigrated += 1;
+      context.unreachable.add(chatId);
+      return;
+    default:
+      assertNever(effect);
+  }
 }
 
-async function onSendFailure(context: SendContext, delivery: Delivery, error: SendError): Promise<Next> {
+async function onSendFailure(
+  context: SendContext,
+  delivery: Delivery,
+  error: SendError,
+  sendStartedAt: string,
+): Promise<Next> {
   context.summary.sendErrors.push(error.kind);
   console.warn(JSON.stringify({ message: "Notification not sent", chatId: delivery.chatId, error }));
-  return error.kind === "rejected" ? dropRejected(context, delivery) : afterSendFailure(error);
+  const policy = failurePolicy(error);
+  try {
+    await applyChatEffect(context, delivery.chatId, policy.chat, sendStartedAt);
+  } catch (effectError) {
+    console.error(
+      JSON.stringify({ message: "Chat not updated after a failed send", chatId: delivery.chatId, error: errorMessage(effectError) }),
+    );
+    return "stop-sending";
+  }
+  if (policy.notification === "drop") {
+    context.summary.notificationsSkipped += delivery.items.length;
+    const marked = await markSent(context, delivery);
+    return marked === "stop-sending" ? marked : policy.sending;
+  }
+  return policy.sending;
 }
 
 async function deliver(context: SendContext, delivery: Delivery): Promise<Next> {
+  const sendStartedAt = new Date().toISOString();
   const sent = await send(() =>
     context.api.sendMessage(delivery.chatId, messageFor(delivery), {
       parse_mode: "HTML",
@@ -205,7 +279,7 @@ async function deliver(context: SendContext, delivery: Delivery): Promise<Next> 
     }),
   );
   if (!sent.ok) {
-    return onSendFailure(context, delivery, sent.error);
+    return onSendFailure(context, delivery, sent.error, sendStartedAt);
   }
   context.summary.messagesSent += 1;
   return markSent(context, delivery);
@@ -217,6 +291,10 @@ function attempts(summary: RunSummary): number {
 
 async function sendAll(context: SendContext, deliveries: readonly Delivery[], maxMessages: number): Promise<void> {
   for (const [index, delivery] of deliveries.entries()) {
+    if (context.unreachable.has(delivery.chatId)) {
+      context.summary.notificationsForUnreachableChats += delivery.items.length;
+      continue;
+    }
     if (attempts(context.summary) >= maxMessages) {
       context.summary.notificationsLeft += countItems(deliveries.slice(index));
       return;
@@ -320,6 +398,9 @@ function emptySummary(mode: NotificationMode): RunSummary {
     notificationsSkipped: 0,
     notificationsLeft: 0,
     sendErrors: [],
+    chatsDeactivated: 0,
+    chatsMigrated: 0,
+    notificationsForUnreachableChats: 0,
     prunedStarGains: null,
     subrequests: 0,
   };
@@ -374,7 +455,7 @@ export async function runStarCheck(
       timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
       ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
     });
-    const sendCalls = await notify({ config, deps, api, summary }, limits);
+    const sendCalls = await notify({ config, deps, api, summary, unreachable: new Set() }, limits);
     summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
     summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
   } finally {

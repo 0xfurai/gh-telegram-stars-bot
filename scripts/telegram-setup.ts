@@ -79,7 +79,8 @@ async function main(): Promise<void> {
   await callApi(token, "setWebhook", {
     url: new URL("/webhook", workerUrl).toString(),
     secret_token: secret,
-    allowed_updates: ["message"],
+    // my_chat_member: the bot is blocked or unblocked, or added to or removed from a group.
+    allowed_updates: ["message", "my_chat_member"],
     drop_pending_updates: false,
   });
   await callApi(token, "setMyCommands", { commands: COMMANDS });

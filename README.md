@@ -102,7 +102,7 @@ A Cron Trigger runs `src/star-check.ts` every 5 minutes:
 
 1. Checks subscribed repositories on GitHub, 100 per GraphQL request, continuing from where the last run stopped.
 2. Saves what changed (stars, names, descriptions) and today's gains.
-3. Sends due notifications: one message per chat, listing every repository whose star count changed since that chat was last told, up or down. The change is the net one: a star gained and lost between two messages sends nothing. Gains go out at once; a loss waits until that subscription hasn't been notified for an hour, so a count that keeps flapping sends at most one gain and one loss an hour. A chat is only marked notified after Telegram accepts the message, so a failed send is retried next run.
+3. Sends due notifications, then due summaries (see [Summaries](#summaries)). Notifications: one message per chat, listing every repository whose star count changed since that chat was last told, up or down. The change is the net one: a star gained and lost between two messages sends nothing. Gains go out at once; a loss waits until that subscription hasn't been notified for an hour, so a count that keeps flapping sends at most one gain and one loss an hour. A chat is only marked notified after Telegram accepts the message, so a failed send is retried next run.
 
 `NOTIFICATIONS` controls step 3:
 
@@ -116,16 +116,29 @@ Limits and safety:
 
 * **Subrequest budget.** Each run stays within 45 subrequests (the free plan allows about 50; fetch calls and D1 queries both count).
   * GitHub gets up to 10 requests (1,000 repositories).
-  * Messages get what's left, at most 20, at 2 subrequests each: the send, then one D1 batch marking it sent.
+  * Messages get what's left, at most 20 (notifications first, then summaries), at 2 subrequests each: the send, then one D1 batch marking it sent. Summaries add up to 2 D1 calls when any are due: reading their changes, and marking those with none.
   * Everything else waits for the next run. The summary's `subrequests` field shows what a run used.
 * **Run lock.** Two runs never overlap. A run that finds the lock held skips. A crashed run's lock expires after 10 minutes. If a failed run can't release the lock either (D1 down), that's logged, and the run reports its own error. If only the release fails, the run fails, so it's recorded and alerted on.
 * **Telegram failures.**
   * A rate limit or outage stops sending for that run.
   * A message Telegram rejects (likely a bug on our side) is logged and dropped.
   * If marking a sent message fails, sending stops, and the possible duplicate is logged.
-* **Retention.** The first run after midnight UTC deletes star gains older than 90 days.
+* **Retention.** The first run after midnight UTC deletes star gains older than 90 days and summary snapshots older than 400 days.
 
 Every run logs a `"Star check finished"` summary.
+
+## Summaries
+
+Each chat also gets a weekly, a monthly and a yearly summary: every followed repository whose star count changed in the period, with its net change and its count at the end, plus a total. When nothing changed, no message goes out.
+
+* **Periods are UTC.** Weeks start on Monday, months on the 1st, years on 1 January.
+* **Send time.** 15:00 UTC on the first day of the next period (afternoon in Europe, morning in the Americas). A chat that sets `/timezone Europe/Berlin` (or `/timezone +3`) gets them at 10:00 local time instead; `/timezone reset` goes back.
+* **Settings.** All three are on by default. `/summaries` shows them; `/summaries weekly off`, `/summaries on` and so on change them.
+* **Data.** On Mondays and 1sts, the star check stores each subscribed repository's count in `star_snapshots` (kept 400 days). A summary is the end snapshot minus the start snapshot. A repository first followed during a period has no start snapshot and is left out of that period's summary. A summary waits until its end snapshot exists.
+* **Delivery.** After the star notifications, with the message slots they leave; `NOTIFICATIONS` and `ALLOWED_CHAT_IDS` apply the same way. A summary that doesn't fit waits for the next run. `chats.*_summary_sent` records the last period sent, so each goes out once.
+* **First summaries** need two snapshots: the first weekly one goes out on the second Monday after deploy, the first monthly one on the second 1st, and the first yearly one on 1 January of the year after next.
+
+After deploying a change to the command list, run `telegram:setup` again so the command menu shows it.
 
 Run one locally with `bun run dev:scheduled`, then open `/__scheduled`.
 

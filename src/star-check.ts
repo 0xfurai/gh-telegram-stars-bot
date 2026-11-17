@@ -9,8 +9,11 @@
 //    repositories gets one message. last_notified_stars is set only after a
 //    successful send, so a failed send is retried next run, with the newer
 //    count.
+// 4. Send due weekly, monthly and yearly summaries (summaries.ts), with the
+//    message slots notifications left. On the first day of a period, step 2
+//    also stores the star counts the summaries compare.
 //
-// Notifications are sent, logged or held according to NOTIFICATIONS. A run
+// Notifications and summaries are sent, logged or held according to NOTIFICATIONS. A run
 // lock keeps two runs from overlapping and sending the same notification.
 import { Api } from "grammy";
 import { chunk } from "./chunk";
@@ -19,20 +22,30 @@ import {
   acquireStarCheckLock,
   listDueNotifications,
   loadStarCheck,
-  markNotifiedMany,
-  pruneStarGains,
+  notifiedStatements,
+  pruneOldData,
   recordStarCheck,
-  deactivateChat,
-  migrateChat,
   releaseStarCheckLock,
   utcDay,
   type DueNotification,
 } from "./db";
+import {
+  attempts,
+  sendAll,
+  skipAll,
+  splitAllowed,
+  SUBREQUESTS_PER_MESSAGE,
+  tally,
+  type Outgoing,
+  type SendContext,
+} from "./delivery";
+import { errorMessage } from "./errors";
 import { checkStars, starCheckUpdates, type GitHubError } from "./github";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "./messages";
+import { isSnapshotDay } from "./periods";
 import { assertNever } from "./result";
-import { send, type SendError } from "./telegram";
-import { errorMessage } from "./errors";
+import { prepareSummaries } from "./summaries";
+import type { SendError } from "./telegram";
 
 /**
  * Subrequests a run may use. The free plan allows about 50 per invocation,
@@ -42,12 +55,10 @@ export const SUBREQUEST_BUDGET = 45;
 
 /**
  * D1 calls every run makes besides sending: take the lock, load, save, list
- * the due notifications, prune (first run of the day), release the lock.
+ * the due notifications, list the due summaries, prune (first run of the
+ * day), release the lock.
  */
-const FIXED_D1_CALLS = 6;
-
-/** Each message costs the send plus one D1 call (marking it, or the chat). */
-const SUBREQUESTS_PER_MESSAGE = 2;
+const FIXED_D1_CALLS = 7;
 
 export const DEFAULT_LIMITS = {
   /** 10 requests = up to 1,000 repositories per run. */
@@ -56,11 +67,17 @@ export const DEFAULT_LIMITS = {
   messages: 20,
   /** Due notification rows read per run. */
   dueRows: 500,
+  /** Chats with a due summary read per run. */
+  summaryCandidates: 500,
+  /** Summaries whose changes are read per run, in one D1 batch. */
+  summaryReads: 50,
 };
 
 export type StarCheckLimits = typeof DEFAULT_LIMITS;
 
 const RETENTION_DAYS = 90;
+// Snapshots are kept long enough for the yearly summary's start of the year.
+const SNAPSHOT_RETENTION_DAYS = 400;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // The cron runs every 5 minutes; the first run after midnight UTC prunes.
 const PRUNE_WINDOW_MS = 5 * 60 * 1000;
@@ -68,8 +85,6 @@ const PRUNE_WINDOW_MS = 5 * 60 * 1000;
 // with a 10 s timeout); a crashed run's lock expires after 10.
 const LOCK_TTL_MS = 10 * 60 * 1000;
 const TELEGRAM_TIMEOUT_SECONDS = 10;
-// D1 statements per batch when marking skipped notifications.
-const MARK_BATCH_SIZE = 100;
 
 export interface StarCheckDeps {
   db: D1Database;
@@ -90,7 +105,10 @@ export interface RunSummary {
   githubError: GitHubError | null;
   rateLimitRemaining: number | null;
   rowsWritten: number;
+  /** Messages Telegram accepted: notifications and summaries. */
   messagesSent: number;
+  /** Subscriptions notified (a message can cover several). */
+  notificationsSent: number;
   /** Subscriptions marked notified without sending (dry-run, not allowed, or rejected). */
   notificationsSkipped: number;
   /** Due notifications this run didn't get to; the next run sends them. */
@@ -105,12 +123,22 @@ export interface RunSummary {
    * this run. They stay due for when the chat is reachable again.
    */
   notificationsForUnreachableChats: number;
+  summariesSent: number;
+  /** Summaries marked sent without sending (dry-run, not allowed, or rejected). */
+  summariesSkipped: number;
+  /** Due summaries with no changes: marked sent, no message. */
+  summariesEmpty: number;
+  /** Due summaries this run didn't get to; a later run sends them. */
+  summariesLeft: number;
+  /** Summaries not tried because their chat became unreachable earlier in this run. */
+  summariesForUnreachableChats: number;
   prunedStarGains: number | null;
+  prunedSnapshots: number | null;
   /** Subrequests this run used, out of SUBREQUEST_BUDGET. */
   subrequests: number;
 }
 
-/** One message to send: a chat and up to MAX_UPDATES_PER_MESSAGE repositories. */
+/** One notification message: a chat and up to MAX_UPDATES_PER_MESSAGE repositories. */
 interface Delivery {
   chatId: number;
   items: DueNotification[];
@@ -142,210 +170,13 @@ function messageFor(delivery: Delivery): string {
   );
 }
 
-function countItems(deliveries: readonly Delivery[]): number {
-  return deliveries.reduce((sum, delivery) => sum + delivery.items.length, 0);
-}
-
-/** What the send loop does after one delivery. */
-type Next = "next-delivery" | "stop-sending";
-
-/** What happens to the chat after a failed send. */
-export type ChatEffect =
-  | { kind: "keep" }
-  /** The bot can't reach the chat: mark it inactive until it's reachable again. */
-  | { kind: "deactivate" }
-  /** The group became a supergroup: move its subscriptions to the new ID. */
-  | { kind: "migrate"; newChatId: number };
-
-export interface FailurePolicy {
-  chat: ChatEffect;
-  /** retry: stays due (next run, or once the chat is reachable). drop: marked sent. */
-  notification: "retry" | "drop";
-  sending: Next;
-}
-
-/**
- * Every send failure's handling, in one exhaustive place.
- *
- * - A rate limit or an unavailable Telegram stops this run's sending; the
- *   rest go out next run.
- * - A blocked or missing chat is deactivated. Its notifications stay due for
- *   when the chat is reachable again: the user unblocks the bot, the bot is
- *   added back to the group (my_chat_member), or the chat sends a command.
- * - A group that became a supergroup moves to its new ID; next run sends there.
- * - A message Telegram rejects (likely our bug, e.g. bad HTML) is dropped, so
- *   it can't take a message slot every run; newer stars produce a new message.
- */
-export function failurePolicy(error: SendError): FailurePolicy {
-  switch (error.kind) {
-    case "rate-limited":
-    case "unavailable":
-      return { chat: { kind: "keep" }, notification: "retry", sending: "stop-sending" };
-    case "blocked":
-    case "chat-not-found":
-      return { chat: { kind: "deactivate" }, notification: "retry", sending: "next-delivery" };
-    case "chat-migrated":
-      return { chat: { kind: "migrate", newChatId: error.newChatId }, notification: "retry", sending: "next-delivery" };
-    case "rejected":
-      return { chat: { kind: "keep" }, notification: "drop", sending: "next-delivery" };
-    default:
-      return assertNever(error);
-  }
-}
-
-interface SendContext {
-  config: AppConfig;
-  deps: StarCheckDeps;
-  api: Api;
-  summary: RunSummary;
-  /** Chats deactivated or migrated during this run: their remaining messages are skipped. */
-  unreachable: Set<number>;
-  /** The run's time (its scheduled time), recorded as when chats were notified. */
-  now: number;
-}
-
-/**
- * Marks a delivery sent. If that fails after Telegram accepted the message,
- * the chat may get it again next run: log that, and stop sending, because D1
- * is likely down.
- */
-async function markSent(context: SendContext, delivery: Delivery): Promise<Next> {
-  try {
-    await markNotifiedMany(context.deps.db, delivery.items, new Date(context.now).toISOString());
-    return "next-delivery";
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        message: "Notification sent but not marked; it may be sent again",
-        chatId: delivery.chatId,
-        error: errorMessage(error),
-      }),
-    );
-    return "stop-sending";
-  }
-}
-
-/** Applies a chat effect. This is the D1 call the message's mark would have used. */
-async function applyChatEffect(context: SendContext, chatId: number, effect: ChatEffect, sendStartedAt: string) {
-  switch (effect.kind) {
-    case "keep":
-      return;
-    case "deactivate":
-      // Skipped if the chat was reactivated after this send started.
-      if (await deactivateChat(context.deps.db, chatId, sendStartedAt)) {
-        context.summary.chatsDeactivated += 1;
-      }
-      context.unreachable.add(chatId);
-      return;
-    case "migrate":
-      await migrateChat(context.deps.db, chatId, effect.newChatId);
-      context.summary.chatsMigrated += 1;
-      context.unreachable.add(chatId);
-      return;
-    default:
-      assertNever(effect);
-  }
-}
-
-async function onSendFailure(
-  context: SendContext,
-  delivery: Delivery,
-  error: SendError,
-  sendStartedAt: string,
-): Promise<Next> {
-  context.summary.sendErrors.push(error.kind);
-  console.warn(JSON.stringify({ message: "Notification not sent", chatId: delivery.chatId, error }));
-  const policy = failurePolicy(error);
-  try {
-    await applyChatEffect(context, delivery.chatId, policy.chat, sendStartedAt);
-  } catch (effectError) {
-    console.error(
-      JSON.stringify({ message: "Chat not updated after a failed send", chatId: delivery.chatId, error: errorMessage(effectError) }),
-    );
-    return "stop-sending";
-  }
-  switch (policy.notification) {
-    case "retry":
-      return policy.sending;
-    case "drop":
-      context.summary.notificationsSkipped += delivery.items.length;
-      return worstOf(await markSent(context, delivery), policy.sending);
-    default:
-      return assertNever(policy.notification);
-  }
-}
-
-/** Stop wins: if either step says stop, the run stops sending. */
-function worstOf(a: Next, b: Next): Next {
-  return a === "stop-sending" || b === "stop-sending" ? "stop-sending" : "next-delivery";
-}
-
-async function deliver(context: SendContext, delivery: Delivery): Promise<Next> {
-  const sendStartedAt = new Date().toISOString();
-  const sent = await send(() =>
-    context.api.sendMessage(delivery.chatId, messageFor(delivery), {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-    }),
-  );
-  if (!sent.ok) {
-    return onSendFailure(context, delivery, sent.error, sendStartedAt);
-  }
-  context.summary.messagesSent += 1;
-  return markSent(context, delivery);
-}
-
-function attempts(summary: RunSummary): number {
-  return summary.messagesSent + summary.sendErrors.length;
-}
-
-async function sendAll(context: SendContext, deliveries: readonly Delivery[], maxMessages: number): Promise<void> {
-  for (const [index, delivery] of deliveries.entries()) {
-    if (context.unreachable.has(delivery.chatId)) {
-      context.summary.notificationsForUnreachableChats += delivery.items.length;
-      continue;
-    }
-    if (attempts(context.summary) >= maxMessages) {
-      context.summary.notificationsLeft += countItems(deliveries.slice(index));
-      return;
-    }
-    const next = await deliver(context, delivery);
-    switch (next) {
-      case "next-delivery":
-        break;
-      case "stop-sending":
-        context.summary.notificationsLeft += countItems(deliveries.slice(index + 1));
-        return;
-      default:
-        assertNever(next);
-    }
-  }
-}
-
-/**
- * Logs notifications and marks them sent without sending (dry-run, or a chat
- * outside ALLOWED_CHAT_IDS), in batches. Returns the D1 calls it made.
- */
-async function skipAll(context: SendContext, deliveries: readonly Delivery[], reason: string): Promise<number> {
-  for (const delivery of deliveries) {
-    console.log(JSON.stringify({ message: "Notification skipped", reason, chatId: delivery.chatId, text: messageFor(delivery) }));
-  }
-  const batches = chunk(deliveries.flatMap((delivery) => delivery.items), MARK_BATCH_SIZE);
-  for (const batch of batches) {
-    await markNotifiedMany(context.deps.db, batch, new Date(context.now).toISOString());
-    context.summary.notificationsSkipped += batch.length;
-  }
-  return batches.length;
-}
-
-/** In staging, notifications only go to ALLOWED_CHAT_IDS; the rest are skipped. */
-function splitAllowed(deliveries: readonly Delivery[], allowed: ReadonlySet<number> | null) {
-  if (allowed === null) {
-    return { allowed: [...deliveries], notAllowed: [] };
-  }
+function notificationOutgoing(delivery: Delivery): Outgoing {
   return {
-    allowed: deliveries.filter((d) => allowed.has(d.chatId)),
-    notAllowed: deliveries.filter((d) => !allowed.has(d.chatId)),
+    kind: "notification",
+    chatId: delivery.chatId,
+    text: messageFor(delivery),
+    items: delivery.items.length,
+    marks: (db, at) => notifiedStatements(db, delivery.items, at),
   };
 }
 
@@ -358,9 +189,10 @@ function messageBudget(summary: RunSummary, limits: StarCheckLimits, extraCalls:
 /** A flapping count sends at most one gain and one loss per subscription in this time. */
 export const LOSS_COOLDOWN_MS = 60 * 60 * 1000;
 
-function listDue(context: SendContext, limits: StarCheckLimits): Promise<DueNotification[]> {
+async function listDue(context: SendContext, limits: StarCheckLimits): Promise<Outgoing[]> {
   const lossesAfter = new Date(context.now - LOSS_COOLDOWN_MS).toISOString();
-  return listDueNotifications(context.deps.db, limits.dueRows, lossesAfter);
+  const due = await listDueNotifications(context.db, limits.dueRows, lossesAfter);
+  return groupDeliveries(due).map(notificationOutgoing);
 }
 
 async function notify(context: SendContext, limits: StarCheckLimits): Promise<number> {
@@ -369,20 +201,67 @@ async function notify(context: SendContext, limits: StarCheckLimits): Promise<nu
     case "off":
       // Emergency stop: nothing is sent or marked; everything stays due.
       return 0;
-    case "dry-run": {
-      // Same budget as sending, so the shadow run behaves like the real thing.
-      const deliveries = groupDeliveries(await listDue(context, limits));
-      const max = messageBudget(context.summary, limits, 0);
-      context.summary.notificationsLeft += countItems(deliveries.slice(max));
-      return skipAll(context, deliveries.slice(0, max), "dry-run");
-    }
+    case "dry-run":
+      return skipWithinBudget(context, await listDue(context, limits), messageBudget(context.summary, limits, 0));
     case "on": {
-      const due = await listDue(context, limits);
-      const { allowed, notAllowed } = splitAllowed(groupDeliveries(due), context.config.allowedChatIds);
-      const skipCalls = await skipAll(context, notAllowed, "chat not in ALLOWED_CHAT_IDS");
-      await sendAll(context, allowed, messageBudget(context.summary, limits, skipCalls));
-      return skipCalls + attempts(context.summary) * SUBREQUESTS_PER_MESSAGE;
+      const messages = await listDue(context, limits);
+      return sendOrSkip(context, messages, (skipCalls) => messageBudget(context.summary, limits, skipCalls));
     }
+    default:
+      return assertNever(mode);
+  }
+}
+
+/**
+ * dry-run: logs and marks at most `max` messages, the same budget as sending,
+ * so the shadow run behaves like the real thing. Returns the D1 calls made.
+ */
+function skipWithinBudget(context: SendContext, messages: readonly Outgoing[], max: number): Promise<number> {
+  tally(context.summary, messages.slice(max), "left");
+  return skipAll(context, messages.slice(0, max), "dry-run");
+}
+
+/**
+ * on: skips chats outside ALLOWED_CHAT_IDS, then sends to the rest until
+ * this run has tried `maxAttempts(skipCalls)` messages in all. Returns the
+ * subrequests used: skip batches, plus a send and a mark per attempt.
+ */
+async function sendOrSkip(
+  context: SendContext,
+  messages: readonly Outgoing[],
+  maxAttempts: (skipCalls: number) => number,
+): Promise<number> {
+  const before = attempts(context.summary);
+  const { allowed, notAllowed } = splitAllowed(messages, context.config.allowedChatIds);
+  const skipCalls = await skipAll(context, notAllowed, "chat not in ALLOWED_CHAT_IDS");
+  await sendAll(context, allowed, maxAttempts(skipCalls));
+  return skipCalls + (attempts(context.summary) - before) * SUBREQUESTS_PER_MESSAGE;
+}
+
+/**
+ * Summaries, with what notifications left of the budget (`callsSoFar` is
+ * what notifications used). Returns the subrequests used, besides the fixed
+ * query for due summaries.
+ */
+async function summarize(context: SendContext, limits: StarCheckLimits, callsSoFar: number): Promise<number> {
+  const mode = context.config.notifications;
+  if (mode === "off") {
+    // Nothing is sent or marked; summaries stay due.
+    return 0;
+  }
+  const prepared = await prepareSummaries(context.db, context.now, limits);
+  Object.assign(context.summary, {
+    summariesLeft: context.summary.summariesLeft + prepared.notRead,
+    summariesEmpty: prepared.empty,
+  });
+  const extra = prepared.calls - 1;
+  const budget = (skipCalls: number) =>
+    Math.min(limits.messages - attempts(context.summary), messageBudget(context.summary, limits, callsSoFar + extra + skipCalls));
+  switch (mode) {
+    case "dry-run":
+      return extra + (await skipWithinBudget(context, prepared.messages, budget(0)));
+    case "on":
+      return extra + (await sendOrSkip(context, prepared.messages, (skipCalls) => attempts(context.summary) + budget(skipCalls)));
     default:
       return assertNever(mode);
   }
@@ -393,11 +272,14 @@ export function isPruneRun(scheduledTime: number): boolean {
   return scheduledTime % DAY_MS < PRUNE_WINDOW_MS;
 }
 
-async function pruneIfDue(db: D1Database, scheduledTime: number): Promise<number | null> {
+async function pruneIfDue(db: D1Database, scheduledTime: number, summary: RunSummary): Promise<void> {
   if (!isPruneRun(scheduledTime)) {
-    return null;
+    return;
   }
-  return pruneStarGains(db, utcDay(new Date(scheduledTime - (RETENTION_DAYS - 1) * DAY_MS)));
+  const daysAgo = (days: number) => utcDay(new Date(scheduledTime - (days - 1) * DAY_MS));
+  const pruned = await pruneOldData(db, daysAgo(RETENTION_DAYS), daysAgo(SNAPSHOT_RETENTION_DAYS));
+  summary.prunedStarGains = pruned.starGains;
+  summary.prunedSnapshots = pruned.snapshots;
 }
 
 function emptySummary(mode: NotificationMode): RunSummary {
@@ -413,13 +295,20 @@ function emptySummary(mode: NotificationMode): RunSummary {
     rateLimitRemaining: null,
     rowsWritten: 0,
     messagesSent: 0,
+    notificationsSent: 0,
     notificationsSkipped: 0,
     notificationsLeft: 0,
     sendErrors: [],
     chatsDeactivated: 0,
     chatsMigrated: 0,
     notificationsForUnreachableChats: 0,
+    summariesSent: 0,
+    summariesSkipped: 0,
+    summariesEmpty: 0,
+    summariesLeft: 0,
+    summariesForUnreachableChats: 0,
     prunedStarGains: null,
+    prunedSnapshots: null,
     subrequests: 0,
   };
 }
@@ -438,7 +327,9 @@ async function checkAndSave(
   });
   const updates = starCheckUpdates(repositories, checked.snapshots);
   const day = utcDay(new Date(controller.scheduledTime));
-  const { rowsWritten } = await recordStarCheck(deps.db, updates, day, checked.nextCursor);
+  const { rowsWritten } = await recordStarCheck(deps.db, updates, day, checked.nextCursor, {
+    snapshot: isSnapshotDay(day),
+  });
 
   Object.assign(summary, {
     repositoriesChecked: checked.snapshots.length,
@@ -480,12 +371,11 @@ async function checkAndNotify(
     timeoutSeconds: TELEGRAM_TIMEOUT_SECONDS,
     ...(deps.telegramFetch ? { fetch: deps.telegramFetch } : {}),
   });
-  const sendCalls = await notify(
-    { config, deps, api, summary, unreachable: new Set(), now: controller.scheduledTime },
-    limits,
-  );
-  summary.prunedStarGains = await pruneIfDue(deps.db, controller.scheduledTime);
-  summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + sendCalls;
+  const context: SendContext = { config, db: deps.db, api, summary, unreachable: new Set(), now: controller.scheduledTime };
+  const notifyCalls = await notify(context, limits);
+  const summaryCalls = await summarize(context, limits, notifyCalls);
+  await pruneIfDue(deps.db, controller.scheduledTime, summary);
+  summary.subrequests = FIXED_D1_CALLS + summary.githubRequests + notifyCalls + summaryCalls;
 }
 
 /**

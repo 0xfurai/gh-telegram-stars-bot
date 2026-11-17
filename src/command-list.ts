@@ -8,6 +8,8 @@ export const PUBLIC_COMMANDS = [
   { command: "add", description: "Subscribe to a repository, e.g. /add microsoft/vscode" },
   { command: "list", description: "Show your repository subscriptions" },
   { command: "remove", description: "Unsubscribe from a repository" },
+  { command: "summaries", description: "Weekly, monthly and yearly star summaries" },
+  { command: "timezone", description: "Set your time zone for summaries" },
 ] as const;
 
 /**

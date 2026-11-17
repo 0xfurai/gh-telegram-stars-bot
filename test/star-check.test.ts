@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { acquireStarCheckLock, getStarCheckCursor, markChatReachable, releaseStarCheckLock } from "../src/db";
 import { MAX_UPDATES_PER_MESSAGE, starNotifications } from "../src/messages";
 import { handleFetch } from "../src/http";
+import { failurePolicy } from "../src/delivery";
 import {
-  failurePolicy,
   groupDeliveries,
   isPruneRun,
   runStarCheck,

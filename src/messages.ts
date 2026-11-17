@@ -6,7 +6,8 @@
 // notifications were never delivered.
 import { chunk } from "./chunk";
 import { ADMIN_COMMANDS, PUBLIC_COMMANDS } from "./command-list";
-import { repositoryUrl, type Repository, type Stats } from "./db";
+import { repositoryUrl, type Repository, type Stats, type SummaryChange, type SummarySettings } from "./db";
+import { DEFAULT_SEND_HOUR_UTC, LOCAL_SEND_HOUR, SUMMARY_KINDS, type Period, type SummaryKind } from "./periods";
 import type { RepositoryInputError } from "./repo-input";
 import { assertNever } from "./result";
 
@@ -236,5 +237,160 @@ export function starNotifications(updates: readonly StarUpdate[]): string {
     changeHeading(updates.map((u) => u.change)),
     "",
     ...updates.map((u) => `📦 ${repositoryLink(u.fullName)}: ${signed(u.change)} (⭐ ${number(u.total)})`),
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Summaries (GSB-23)
+
+/** Most repositories listed in one summary, to stay well under Telegram's 4096 characters. */
+export const MAX_SUMMARY_LINES = 25;
+
+const SUMMARY_TITLES: Record<SummaryKind, string> = {
+  weekly: "📅 <b>Your weekly star summary</b>",
+  monthly: "🗓 <b>Your monthly star summary</b>",
+  yearly: "🎉 <b>Your year in stars</b>",
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function formatDay(day: string, options: Intl.DateTimeFormatOptions): string {
+  return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-GB", { ...options, timeZone: "UTC" });
+}
+
+/** "3 Nov 2026 – 9 Nov 2026", "October 2026" or "2026". */
+export function periodLabel(period: Period): string {
+  switch (period.kind) {
+    case "weekly": {
+      const last = new Date(Date.parse(`${period.end}T00:00:00Z`) - DAY_MS).toISOString().slice(0, 10);
+      const short = { day: "numeric", month: "short", year: "numeric" } as const;
+      return `${formatDay(period.start, short)} \u2013 ${formatDay(last, short)}`;
+    }
+    case "monthly":
+      return formatDay(period.start, { month: "long", year: "numeric" });
+    case "yearly":
+      return period.start.slice(0, 4);
+    default:
+      return assertNever(period.kind);
+  }
+}
+
+/** "+130" or "−3"; "0" only for a total whose gains and losses cancel out. */
+function signedTotal(total: number): string {
+  return total === 0 ? "0" : signed(total);
+}
+
+/**
+ * A summary of the repositories that changed in `period`, in the order
+ * given (biggest gain first). Takes at least one change.
+ */
+export function starSummary(period: Period, changes: readonly SummaryChange[]): string {
+  if (changes.length === 0) {
+    throw new RangeError("A summary needs at least one change");
+  }
+  const shown = changes.slice(0, MAX_SUMMARY_LINES);
+  const hidden = changes.length - shown.length;
+  const total = changes.reduce((sum, c) => sum + c.change, 0);
+  return [
+    SUMMARY_TITLES[period.kind],
+    html(periodLabel(period)),
+    "",
+    ...shown.map((c) => `📦 ${repositoryLink(c.fullName)}: ${signed(c.change)} (⭐ ${number(c.stars)})`),
+    ...(hidden > 0 ? [`…and ${count(hidden, "more repository", "more repositories")}`] : []),
+    "",
+    `<b>Total:</b> ${signedTotal(total)} across ${count(changes.length, "repository", "repositories")}`,
+    "",
+    "Change or turn off summaries with /summaries.",
+  ].join("\n");
+}
+
+const SUMMARY_SCHEDULE: Record<SummaryKind, string> = {
+  weekly: "Mondays, for the week before",
+  monthly: "on the 1st, for the month before",
+  yearly: "on 1 January, for the year before",
+};
+
+function sendTimeLine(timeZone: string | null): string {
+  return timeZone === null
+    ? `They go out at ${DEFAULT_SEND_HOUR_UTC}:00 UTC. Use /timezone to get them at ${LOCAL_SEND_HOUR}:00 your time.`
+    : `They go out at ${LOCAL_SEND_HOUR}:00 in <code>${html(timeZone)}</code>. Change it with /timezone.`;
+}
+
+const SUMMARIES_USAGE = [
+  "<b>Change them:</b>",
+  "<code>/summaries weekly off</code>",
+  "<code>/summaries monthly on</code>",
+  "<code>/summaries off</code> - all off",
+  "<code>/summaries on</code> - all on",
+].join("\n");
+
+/** The /summaries reply: what this chat gets, and when. */
+export function summarySettings(settings: SummarySettings): string {
+  return [
+    "📅 <b>Star summaries</b>",
+    "",
+    ...SUMMARY_KINDS.map(
+      (kind) => `${settings.enabled[kind] ? "✅" : "⏸"} ${capitalize(kind)}: ${settings.enabled[kind] ? "on" : "off"} (${SUMMARY_SCHEDULE[kind]})`,
+    ),
+    "",
+    "A summary shows each repository's net star change in the period. When nothing changed, I don't send one.",
+    sendTimeLine(settings.timeZone),
+    "",
+    SUMMARIES_USAGE,
+  ].join("\n");
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function summariesUsage(): string {
+  return ["I didn't understand that.", "", SUMMARIES_USAGE].join("\n");
+}
+
+/** After /summaries changed something. */
+export function summariesChanged(kinds: readonly SummaryKind[], enabled: boolean): string {
+  const what = kinds.length === SUMMARY_KINDS.length ? "All summaries are" : `${capitalize(kinds.join(", "))} summaries are`;
+  return `✅ ${what} ${enabled ? "on" : "off"}.`;
+}
+
+const TIME_ZONE_USAGE = [
+  "<b>Examples:</b>",
+  "<code>/timezone Europe/Berlin</code>",
+  "<code>/timezone America/New_York</code>",
+  "<code>/timezone +3</code> or <code>/timezone -5:30</code>",
+  "<code>/timezone reset</code> - back to the default",
+].join("\n");
+
+/** The /timezone reply without arguments. */
+export function timeZoneInfo(timeZone: string | null): string {
+  const current =
+    timeZone === null
+      ? `No time zone set. Summaries go out at ${DEFAULT_SEND_HOUR_UTC}:00 UTC.`
+      : `Your time zone: <code>${html(timeZone)}</code>. Summaries go out at ${LOCAL_SEND_HOUR}:00 there.`;
+  return [
+    "🕙 <b>Time zone</b>",
+    "",
+    current,
+    `Set one to get summaries at ${LOCAL_SEND_HOUR}:00 your time. Names follow daylight saving time; offsets like +3 don't.`,
+    "",
+    TIME_ZONE_USAGE,
+  ].join("\n");
+}
+
+export function timeZoneSet(timeZone: string): string {
+  return `✅ Time zone set to <code>${html(timeZone)}</code>. Summaries go out at ${LOCAL_SEND_HOUR}:00 there.`;
+}
+
+export function timeZoneReset(): string {
+  return `✅ Time zone removed. Summaries go out at ${DEFAULT_SEND_HOUR_UTC}:00 UTC.`;
+}
+
+export function invalidTimeZone(input: string): string {
+  return [
+    `❌ I don't know the time zone <code>${html(input)}</code>.`,
+    "Use a name from the tz database, or an offset from UTC.",
+    "",
+    TIME_ZONE_USAGE,
   ].join("\n");
 }

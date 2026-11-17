@@ -125,3 +125,52 @@ describe("messages", () => {
     expect(messages.notSubscribed("a", "<b>")).toContain("a/&lt;b&gt;");
   });
 });
+
+describe("star summaries", () => {
+  const week = { kind: "weekly", start: "2026-11-09", end: "2026-11-16" } as const;
+
+  it("lists each change with the count at the end, and a net total", () => {
+    const text = messages.starSummary(week, [
+      { fullName: "owner/a_b", stars: 1500, change: 120 },
+      { fullName: "owner/c", stars: 40, change: -3 },
+    ]);
+
+    expect(text).toBe(
+      [
+        "📅 <b>Your weekly star summary</b>",
+        "9 Nov 2026 – 15 Nov 2026",
+        "",
+        '📦 <a href="https://github.com/owner/a_b">owner/a_b</a>: +120 (⭐ 1,500)',
+        '📦 <a href="https://github.com/owner/c">owner/c</a>: −3 (⭐ 40)',
+        "",
+        "<b>Total:</b> +117 across 2 repositories",
+        "",
+        "Change or turn off summaries with /summaries.",
+      ].join("\n"),
+    );
+  });
+
+  it("labels months and years", () => {
+    expect(messages.periodLabel({ kind: "monthly", start: "2026-10-01", end: "2026-11-01" })).toBe("October 2026");
+    expect(messages.periodLabel({ kind: "yearly", start: "2026-01-01", end: "2027-01-01" })).toBe("2026");
+  });
+
+  it("shows at most 25 repositories, and how many more changed", () => {
+    const changes = Array.from({ length: 30 }, (_, i) => ({ fullName: `o/r-${i}`, stars: 10, change: 1 }));
+    const text = messages.starSummary(week, changes);
+
+    expect(text.match(/📦/g)).toHaveLength(messages.MAX_SUMMARY_LINES);
+    expect(text).toContain("…and 5 more repositories");
+    expect(text).toContain("<b>Total:</b> +30 across 30 repositories");
+  });
+
+  it("shows a total of 0 when gains and losses cancel out, and refuses an empty summary", () => {
+    const text = messages.starSummary(week, [
+      { fullName: "o/a", stars: 12, change: 2 },
+      { fullName: "o/b", stars: 8, change: -2 },
+    ]);
+
+    expect(text).toContain("<b>Total:</b> 0 across 2 repositories");
+    expect(() => messages.starSummary(week, [])).toThrow(RangeError);
+  });
+});

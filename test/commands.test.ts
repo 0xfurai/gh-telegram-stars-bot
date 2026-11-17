@@ -320,3 +320,70 @@ describe("plain text", () => {
     expect(await lastNotified(-100, 10)).toBe(230000);
   });
 });
+
+describe("/summaries and /timezone", () => {
+  async function chatRow(chatId = 1) {
+    return db
+      .prepare("SELECT weekly_summary, monthly_summary, yearly_summary, time_zone FROM chats WHERE id = ?")
+      .bind(chatId)
+      .first();
+  }
+
+  it("shows every summary on by default, with the default send hour", async () => {
+    const text = await replyTo("/summaries");
+
+    expect(text).toBe(
+      messages.summarySettings({ enabled: { weekly: true, monthly: true, yearly: true }, timeZone: null }),
+    );
+    expect(text).toContain("15:00 UTC");
+  });
+
+  it("turns one kind off, and all of them on again", async () => {
+    expect(await replyTo("/summaries weekly off")).toBe(messages.summariesChanged(["weekly"], false));
+    expect(await chatRow()).toMatchObject({ weekly_summary: 0, monthly_summary: 1, yearly_summary: 1 });
+
+    expect(await replyTo("/summaries OFF")).toBe(messages.summariesChanged(["weekly", "monthly", "yearly"], false));
+    expect(await chatRow()).toMatchObject({ weekly_summary: 0, monthly_summary: 0, yearly_summary: 0 });
+
+    await replyTo("/summaries all on");
+    expect(await chatRow()).toMatchObject({ weekly_summary: 1, monthly_summary: 1, yearly_summary: 1 });
+  });
+
+  it("explains input it doesn't understand, and changes nothing", async () => {
+    for (const input of ["/summaries daily off", "/summaries weekly", "/summaries weekly off now"]) {
+      expect(await replyTo(input)).toBe(messages.summariesUsage());
+    }
+    expect(await chatRow()).toMatchObject({ weekly_summary: 1, monthly_summary: 1, yearly_summary: 1 });
+  });
+
+  it("sets a time zone by name or offset, shows it, and resets it", async () => {
+    expect(await replyTo("/timezone europe/berlin")).toBe(messages.timeZoneSet("Europe/Berlin"));
+    expect(await replyTo("/timezone")).toBe(messages.timeZoneInfo("Europe/Berlin"));
+    expect(await replyTo("/summaries")).toContain("10:00 in <code>Europe/Berlin</code>");
+
+    expect(await replyTo("/timezone +5:30")).toBe(messages.timeZoneSet("UTC+05:30"));
+    expect(await chatRow()).toMatchObject({ time_zone: "UTC+05:30" });
+
+    expect(await replyTo("/timezone reset")).toBe(messages.timeZoneReset());
+    expect(await chatRow()).toMatchObject({ time_zone: null });
+  });
+
+  it("refuses an unknown time zone and keeps the old one", async () => {
+    await replyTo("/timezone Europe/Kyiv");
+
+    expect(await replyTo("/timezone Mars/Olympus")).toBe(messages.invalidTimeZone("Mars/Olympus"));
+    expect(await chatRow()).toMatchObject({ time_zone: "Europe/Kyiv" });
+  });
+
+  it("escapes the input it echoes back", async () => {
+    expect(await replyTo("/timezone <b>")).toContain("&lt;b&gt;");
+  });
+
+  it("lists both commands in /help and the welcome message", async () => {
+    for (const command of ["/start", "/help"]) {
+      const text = await replyTo(command);
+      expect(text).toContain("/summaries");
+      expect(text).toContain("/timezone");
+    }
+  });
+});

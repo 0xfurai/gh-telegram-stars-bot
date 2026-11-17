@@ -8,6 +8,7 @@
 // Cost: D1 bills rows read and written. Comments note what each repeated
 // operation costs; test/db.test.ts checks the ones the star check repeats.
 import { err, ok, type Result } from "./result";
+import { SUMMARY_KINDS, type Period, type SummaryKind } from "./periods";
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
@@ -155,6 +156,17 @@ export async function deactivateChat(db: D1Database, chatId: number, sendStarted
   return result.meta.changes > 0;
 }
 
+/** Chat columns about summaries; migrateChat copies them to the new ID. */
+const CHAT_SUMMARY_COLUMNS = [
+  "weekly_summary",
+  "monthly_summary",
+  "yearly_summary",
+  "weekly_summary_sent",
+  "monthly_summary_sent",
+  "yearly_summary_sent",
+  "time_zone",
+].join(", ");
+
 /**
  * A group became a supergroup with a new ID: move its subscriptions to the new
  * chat (keeping what it was last told), and deactivate the old one. One batch.
@@ -164,6 +176,14 @@ export async function migrateChat(db: D1Database, oldChatId: number, newChatId: 
     db
       .prepare(`INSERT INTO chats (id) VALUES (?1) ON CONFLICT (id) DO UPDATE SET is_active = 1, updated_at = ${NOW}`)
       .bind(newChatId),
+    // Summary settings and what was already sent move along, so the new ID
+    // doesn't get a summary twice.
+    db
+      .prepare(
+        `UPDATE chats SET (${CHAT_SUMMARY_COLUMNS}) = (SELECT ${CHAT_SUMMARY_COLUMNS} FROM chats WHERE id = ?1)
+         WHERE id = ?2 AND EXISTS (SELECT 1 FROM chats WHERE id = ?1)`,
+      )
+      .bind(oldChatId, newChatId),
     db
       .prepare(
         `INSERT INTO chat_repositories (chat_id, repository_id, last_notified_stars, created_at)
@@ -391,8 +411,11 @@ export async function recordStarCheck(
   updates: readonly StarCheckUpdate[],
   day: string,
   nextCursor?: number,
+  options: { snapshot?: boolean } = {},
 ): Promise<{ rowsWritten: number }> {
   const cursor = nextCursor === undefined ? [] : [setCursorStatement(db, nextCursor)];
+  // After the updates, so the snapshot has this run's counts.
+  const snapshot = options.snapshot ? snapshotStatements(db, day) : [];
   const statements = updates.flatMap((update) => [
     recordGainStatement(db, update.id, update.starsCount, day),
     db
@@ -403,10 +426,11 @@ export async function recordStarCheck(
       )
       .bind(update.id, update.starsCount, update.fullName, update.description, update.isArchived ? 1 : 0),
   ]);
-  if (statements.length + cursor.length === 0) {
+  const all = [...statements, ...cursor, ...snapshot];
+  if (all.length === 0) {
     return { rowsWritten: 0 };
   }
-  const results = await db.batch([...statements, ...cursor]);
+  const results = await db.batch(all);
   return { rowsWritten: results.reduce((sum, result) => sum + result.meta.rows_written, 0) };
 }
 
@@ -458,21 +482,30 @@ export async function listDueNotifications(db: D1Database, limit: number, losses
  */
 export async function markNotifiedMany(
   db: D1Database,
-  items: readonly { chatId: number; repositoryId: number; starsCount: number }[],
+  items: readonly NotifiedItem[],
   at: string,
 ): Promise<void> {
   if (items.length === 0) {
     return;
   }
-  await db.batch(
-    items.map((item) =>
-      db
-        .prepare(
-          `UPDATE chat_repositories SET last_notified_stars = ?3, last_notified_at = ?4
-           WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars <> ?3`,
-        )
-        .bind(item.chatId, item.repositoryId, item.starsCount, at),
-    ),
+  await db.batch(notifiedStatements(db, items, at));
+}
+
+export interface NotifiedItem {
+  chatId: number;
+  repositoryId: number;
+  starsCount: number;
+}
+
+/** The statements markNotifiedMany runs, for batching with others. */
+export function notifiedStatements(db: D1Database, items: readonly NotifiedItem[], at: string): D1PreparedStatement[] {
+  return items.map((item) =>
+    db
+      .prepare(
+        `UPDATE chat_repositories SET last_notified_stars = ?3, last_notified_at = ?4
+         WHERE chat_id = ?1 AND repository_id = ?2 AND last_notified_stars <> ?3`,
+      )
+      .bind(item.chatId, item.repositoryId, item.starsCount, at),
   );
 }
 
@@ -480,6 +513,22 @@ export async function markNotifiedMany(
 export async function pruneStarGains(db: D1Database, beforeDay: string): Promise<number> {
   const result = await db.prepare("DELETE FROM daily_star_gains WHERE day < ?").bind(beforeDay).run();
   return result.meta.changes;
+}
+
+/**
+ * The daily cleanup, in one D1 call: star gains before `gainsBefore` and
+ * snapshots before `snapshotsBefore` (both YYYY-MM-DD). Returns rows deleted.
+ */
+export async function pruneOldData(
+  db: D1Database,
+  gainsBefore: string,
+  snapshotsBefore: string,
+): Promise<{ starGains: number; snapshots: number }> {
+  const [gains, snapshots] = await db.batch([
+    db.prepare("DELETE FROM daily_star_gains WHERE day < ?").bind(gainsBefore),
+    db.prepare("DELETE FROM star_snapshots WHERE day < ?").bind(snapshotsBefore),
+  ]);
+  return { starGains: gains?.meta.changes ?? 0, snapshots: snapshots?.meta.changes ?? 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -552,4 +601,206 @@ export async function acquireStarCheckLock(db: D1Database, now: number, until: n
 
 export async function releaseStarCheckLock(db: D1Database): Promise<void> {
   await db.prepare("UPDATE star_check_state SET locked_until = NULL WHERE id = 1").run();
+}
+
+// ---------------------------------------------------------------------------
+// Summaries (GSB-23)
+
+/**
+ * Stores every subscribed repository's current count as its snapshot for
+ * `day`, a period boundary, and records that `day` has snapshots. Repeating
+ * it the same day writes only repositories that had no snapshot yet (first
+ * subscribed since). Reads each subscribed repository once.
+ */
+function snapshotStatements(db: D1Database, day: string): D1PreparedStatement[] {
+  return [
+    db
+      .prepare(
+        `INSERT INTO star_snapshots (repository_id, day, stars_count)
+         SELECT r.id, ?1, r.stars_count FROM repositories r
+         WHERE EXISTS (SELECT 1 FROM chat_repositories cr WHERE cr.repository_id = r.id)
+         ON CONFLICT (repository_id, day) DO NOTHING`,
+      )
+      .bind(day),
+    db
+      .prepare("UPDATE star_check_state SET last_snapshot_day = ?1 WHERE id = 1 AND last_snapshot_day IS NOT ?1")
+      .bind(day),
+  ];
+}
+
+/** Column names per summary kind. Fixed strings, never user input. */
+const SUMMARY_COLUMNS: Record<SummaryKind, { enabled: string; sent: string }> = {
+  weekly: { enabled: "weekly_summary", sent: "weekly_summary_sent" },
+  monthly: { enabled: "monthly_summary", sent: "monthly_summary_sent" },
+  yearly: { enabled: "yearly_summary", sent: "yearly_summary_sent" },
+};
+
+export interface SummarySettings {
+  enabled: Record<SummaryKind, boolean>;
+  /** Null: the default send hour. */
+  timeZone: string | null;
+}
+
+/** A chat's summary settings; the defaults for a chat that isn't stored. */
+export async function getSummarySettings(db: D1Database, chatId: number): Promise<SummarySettings> {
+  const row =
+    (await db
+      .prepare("SELECT weekly_summary, monthly_summary, yearly_summary, time_zone FROM chats WHERE id = ?")
+      .bind(chatId)
+      .first<SummarySettingsRow>()) ?? DEFAULT_SUMMARY_SETTINGS;
+  return {
+    enabled: { weekly: row.weekly_summary === 1, monthly: row.monthly_summary === 1, yearly: row.yearly_summary === 1 },
+    timeZone: row.time_zone,
+  };
+}
+
+interface SummarySettingsRow {
+  weekly_summary: number;
+  monthly_summary: number;
+  yearly_summary: number;
+  time_zone: string | null;
+}
+
+/** The column defaults (migrations/0006), for a chat that isn't stored yet. */
+const DEFAULT_SUMMARY_SETTINGS: SummarySettingsRow = {
+  weekly_summary: 1,
+  monthly_summary: 1,
+  yearly_summary: 1,
+  time_zone: null,
+};
+
+/** Turns summaries of `kinds` on or off for a chat, creating the chat if needed. One batch. */
+export async function setSummariesEnabled(
+  db: D1Database,
+  chatId: number,
+  kinds: readonly SummaryKind[],
+  enabled: boolean,
+): Promise<void> {
+  const set = kinds.map((kind) => `${SUMMARY_COLUMNS[kind].enabled} = ?2`).join(", ");
+  await db.batch([
+    db.prepare("INSERT INTO chats (id) VALUES (?) ON CONFLICT (id) DO NOTHING").bind(chatId),
+    db.prepare(`UPDATE chats SET ${set} WHERE id = ?1`).bind(chatId, enabled ? 1 : 0),
+  ]);
+}
+
+/** Sets a chat's time zone (as parseTimeZone returns it), or null for the default. */
+export async function setTimeZone(db: D1Database, chatId: number, timeZone: string | null): Promise<void> {
+  await db
+    .prepare("INSERT INTO chats (id, time_zone) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET time_zone = ?2")
+    .bind(chatId, timeZone)
+    .run();
+}
+
+/** An active chat with at least one summary due, before its send time is checked. */
+export interface SummaryCandidate {
+  chatId: number;
+  timeZone: string | null;
+  due: SummaryKind[];
+}
+
+function dueCondition(kind: SummaryKind, start: number, end: number): string {
+  const { enabled, sent } = SUMMARY_COLUMNS[kind];
+  // Never sent: due once the chat existed before the period ended, so a new
+  // chat doesn't get last week's summary the day it starts.
+  return `(c.${enabled} = 1 AND s.last_snapshot_day >= ?${end}
+           AND (c.${sent} < ?${start} OR (c.${sent} IS NULL AND c.created_at < ?${end})))`;
+}
+
+/**
+ * Active chats with a summary due for `periods` (the last complete period of
+ * each kind): turned on, not sent yet, and the period's end snapshot exists.
+ * Reads every chat once.
+ */
+export async function listSummaryCandidates(
+  db: D1Database,
+  periods: Readonly<Record<SummaryKind, Period>>,
+  limit: number,
+): Promise<SummaryCandidate[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, time_zone, weekly, monthly, yearly FROM (
+         SELECT c.id, c.time_zone,
+           ${dueCondition("weekly", 1, 2)} AS weekly,
+           ${dueCondition("monthly", 3, 4)} AS monthly,
+           ${dueCondition("yearly", 5, 6)} AS yearly
+         FROM chats c JOIN star_check_state s ON s.id = 1
+         WHERE c.is_active = 1
+       )
+       WHERE weekly OR monthly OR yearly
+       ORDER BY id
+       LIMIT ?7`,
+    )
+    .bind(
+      periods.weekly.start,
+      periods.weekly.end,
+      periods.monthly.start,
+      periods.monthly.end,
+      periods.yearly.start,
+      periods.yearly.end,
+      limit,
+    )
+    .all<{ id: number; time_zone: string | null; weekly: number; monthly: number; yearly: number }>();
+
+  return results.map((row) => ({
+    chatId: row.id,
+    timeZone: row.time_zone,
+    due: SUMMARY_KINDS.filter((kind) => row[kind] === 1),
+  }));
+}
+
+/** One repository's change in a summary. */
+export interface SummaryChange {
+  fullName: string;
+  /** Stars at the end of the period. */
+  stars: number;
+  /** Net change over the period; never 0. */
+  change: number;
+}
+
+/**
+ * Each chat's repositories that changed in its period, biggest gain first,
+ * in one D1 call. Repositories without both snapshots (first subscribed
+ * during the period) are left out.
+ */
+export async function listSummaryChanges(
+  db: D1Database,
+  requests: readonly { chatId: number; period: Period }[],
+): Promise<SummaryChange[][]> {
+  if (requests.length === 0) {
+    return [];
+  }
+  const results = await db.batch<{ full_name: string; stars: number; change: number }>(
+    requests.map(({ chatId, period }) =>
+      db
+        .prepare(
+          `SELECT r.full_name, e.stars_count AS stars, e.stars_count - s.stars_count AS change
+           FROM chat_repositories cr
+           JOIN repositories r ON r.id = cr.repository_id
+           JOIN star_snapshots s ON s.repository_id = cr.repository_id AND s.day = ?2
+           JOIN star_snapshots e ON e.repository_id = cr.repository_id AND e.day = ?3
+           WHERE cr.chat_id = ?1 AND e.stars_count <> s.stars_count
+           ORDER BY change DESC, r.full_name`,
+        )
+        .bind(chatId, period.start, period.end),
+    ),
+  );
+  return results.map((result) =>
+    result.results.map((row) => ({ fullName: row.full_name, stars: row.stars, change: row.change })),
+  );
+}
+
+/** Records that a chat got (or skipped) its summary for `period`. */
+export function summarySentStatement(db: D1Database, chatId: number, period: Period): D1PreparedStatement {
+  return db.prepare(`UPDATE chats SET ${SUMMARY_COLUMNS[period.kind].sent} = ?2 WHERE id = ?1`).bind(chatId, period.start);
+}
+
+/** summarySentStatement for many, in one D1 call. */
+export async function markSummariesSent(
+  db: D1Database,
+  items: readonly { chatId: number; period: Period }[],
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+  await db.batch(items.map((item) => summarySentStatement(db, item.chatId, item.period)));
 }

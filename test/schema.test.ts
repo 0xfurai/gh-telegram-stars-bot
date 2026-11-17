@@ -77,6 +77,7 @@ describe("schema", () => {
       { type: "table", name: "repositories" },
       { type: "table", name: "star_check_runs" },
       { type: "table", name: "star_check_state" },
+      { type: "table", name: "star_snapshots" },
     ]);
   });
 });

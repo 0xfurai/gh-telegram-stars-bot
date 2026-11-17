@@ -5,7 +5,10 @@ import type { CommandName } from "./command-list";
 import type { AppConfig } from "./config";
 import {
   getStats,
+  getSummarySettings,
   listSubscriptions,
+  setSummariesEnabled,
+  setTimeZone,
   subscribe,
   unsubscribe,
   upsertRepository,
@@ -15,9 +18,11 @@ import {
 } from "./db";
 import { getRepository, type GitHubClient, type RepositoryLookupError } from "./github";
 import * as messages from "./messages";
+import { SUMMARY_KINDS, type SummaryKind } from "./periods";
 import { parseRepositoryInput, type RepositoryName } from "./repo-input";
 import { assertNever } from "./result";
 import { replyHtml } from "./telegram";
+import { parseTimeZone } from "./time-zone";
 
 /** A command handler. `args` is the text after the command, trimmed. */
 export type CommandHandler = (ctx: Context, args: string) => Promise<void>;
@@ -91,6 +96,35 @@ function precheckReply(subscriptions: readonly Repository[], input: RepositoryNa
   return subscriptions.length >= max ? messages.limitReached(max) : null;
 }
 
+export type SummariesRequest =
+  | { kind: "show" }
+  | { kind: "set"; kinds: SummaryKind[]; enabled: boolean }
+  | { kind: "invalid" };
+
+const ON_OFF: Record<string, boolean> = { on: true, off: false };
+
+/** `/summaries [weekly|monthly|yearly|all] on|off`, or nothing to show the settings. */
+export function parseSummariesArgs(args: string): SummariesRequest {
+  const words = args.toLowerCase().split(/\s+/).filter((word) => word !== "");
+  if (words.length === 0) {
+    return { kind: "show" };
+  }
+  const [first = "", second] = words;
+  const enabled = ON_OFF[second ?? first];
+  const kinds = summaryKindsFor(second === undefined ? "all" : first);
+  if (enabled === undefined || words.length > 2 || kinds.length === 0) {
+    return { kind: "invalid" };
+  }
+  return { kind: "set", kinds, enabled };
+}
+
+/** "all" or one kind; empty for anything else. */
+function summaryKindsFor(target: string): SummaryKind[] {
+  return target === "all" ? [...SUMMARY_KINDS] : SUMMARY_KINDS.filter((kind) => kind === target);
+}
+
+const TIME_ZONE_RESETS = new Set(["reset", "off", "default", "none"]);
+
 function chatIdOf(ctx: Context): number {
   if (ctx.chat === undefined) {
     throw new Error("Command without a chat");
@@ -140,6 +174,39 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
     );
   };
 
+  const summaries: CommandHandler = async (ctx, args) => {
+    const chatId = chatIdOf(ctx);
+    const request = parseSummariesArgs(args);
+    switch (request.kind) {
+      case "show":
+        return replyHtml(ctx, messages.summarySettings(await getSummarySettings(deps.db, chatId)));
+      case "set":
+        await setSummariesEnabled(deps.db, chatId, request.kinds, request.enabled);
+        return replyHtml(ctx, messages.summariesChanged(request.kinds, request.enabled));
+      case "invalid":
+        return replyHtml(ctx, messages.summariesUsage());
+      default:
+        return assertNever(request);
+    }
+  };
+
+  const timezone: CommandHandler = async (ctx, args) => {
+    const chatId = chatIdOf(ctx);
+    if (args === "") {
+      return replyHtml(ctx, messages.timeZoneInfo((await getSummarySettings(deps.db, chatId)).timeZone));
+    }
+    if (TIME_ZONE_RESETS.has(args.toLowerCase())) {
+      await setTimeZone(deps.db, chatId, null);
+      return replyHtml(ctx, messages.timeZoneReset());
+    }
+    const parsed = parseTimeZone(args);
+    if (!parsed.ok) {
+      return replyHtml(ctx, messages.invalidTimeZone(args));
+    }
+    await setTimeZone(deps.db, chatId, parsed.value);
+    return replyHtml(ctx, messages.timeZoneSet(parsed.value));
+  };
+
   return {
     start: (ctx) => replyHtml(ctx, messages.welcome()),
     help: (ctx) => replyHtml(ctx, messages.help(max, chatIdOf(ctx) === deps.config.adminChatId)),
@@ -150,6 +217,8 @@ export function createCommandHandlers(deps: CommandDeps): Record<CommandName, Co
       }
     },
     remove,
+    summaries,
+    timezone,
     // Admin only: the dispatcher never calls it outside ADMIN_CHAT_ID.
     stats: async (ctx) => {
       const since = utcDay(new Date(now().getTime() - (STATS_DAYS - 1) * DAY_MS));
